@@ -1,134 +1,109 @@
 #!/usr/bin/env node
 /**
- * moneymcp — MCP server exposing the user's bank transactions as a tool.
+ * moneymcp scraper — runs on a schedule (GitHub Actions), scrapes Bank Hapoalim
+ * via israeli-bank-scrapers, and upserts transactions into Cloudflare D1.
  *
- * POC scope: a single tool, `get_transactions`, that scrapes Bank Hapoalim
- * via israeli-bank-scrapers and returns raw transactions. It deliberately does
- * NOT decide what is "significant" — the calling agent reasons over the list.
+ * 2FA: uses a PERSISTENT browser profile (BROWSER_PROFILE_DIR) so Hapoalim
+ * keeps treating this as a trusted device. The profile is established once by
+ * `npm run login` (see login.ts) and, in CI, restored from an encrypted secret
+ * before this runs. If Hapoalim still challenges, the scrape fails and is
+ * recorded; the Telegram relay (separate) notifies the user to re-bootstrap.
  *
- * IMPORTANT: this is an MCP stdio server. Nothing may be written to stdout
- * except the MCP protocol itself — all logging goes to stderr (console.error).
+ * All sensitive values come from env (GitHub Actions secrets) — never logged.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 import { createScraper, CompanyTypes } from "israeli-bank-scrapers";
+import { d1ConfigFromEnv, d1Query, type D1Config } from "./d1.js";
+import { txnToRow, type ScrapedTxn, type TxnRow } from "./transform.js";
 
-const BANK_USER_CODE = process.env.BANK_USER_CODE;
-const BANK_PASSWORD = process.env.BANK_PASSWORD;
-
-/** First day of the month `monthsBack` months before today. */
-function startOfMonthsAgo(monthsBack: number): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth() - monthsBack, 1);
+function required(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env var: ${name}`);
+  return v;
 }
 
-const server = new McpServer({ name: "moneymcp", version: "0.1.0" });
+function startDate(daysBack: number): Date {
+  const d = new Date();
+  d.setDate(d.getDate() - daysBack);
+  return d;
+}
 
-server.tool(
-  "get_transactions",
-  "Fetch the user's recent Bank Hapoalim transactions by scraping the bank. " +
-    "Returns raw transactions (date, description, amount, currency, status). " +
-    "The caller decides which transactions are 'significant' — this tool does not filter. " +
-    "Note: scraping drives a headless browser and may take 30-60 seconds.",
-  {
-    monthsBack: z
-      .number()
-      .int()
-      .min(0)
-      .max(12)
-      .optional()
-      .describe(
-        "How many months back to start from. 0 = since the 1st of the current month (default)."
-      ),
-  },
-  async ({ monthsBack = 0 }) => {
-    if (!BANK_USER_CODE || !BANK_PASSWORD) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Missing credentials: set BANK_USER_CODE and BANK_PASSWORD in the server environment.",
-          },
-        ],
-      };
-    }
+const UPSERT_SQL = `
+INSERT INTO transactions
+  (hash, account, date, description, memo, amount, currency, status, type, category, scraped_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(hash) DO UPDATE SET
+  status = excluded.status,
+  memo = excluded.memo,
+  category = excluded.category,
+  scraped_at = excluded.scraped_at`;
 
-    const startDate = startOfMonthsAgo(monthsBack);
-    console.error(
-      `[moneymcp] scraping Hapoalim from ${startDate.toISOString().slice(0, 10)} ...`
-    );
-
-    const scraper = createScraper({
-      companyId: CompanyTypes.hapoalim,
-      startDate,
-      combineInstallments: false,
-      showBrowser: false,
-    });
-
-    const result = await scraper.scrape({
-      userCode: BANK_USER_CODE,
-      password: BANK_PASSWORD,
-    });
-
-    if (!result.success) {
-      console.error(
-        `[moneymcp] scrape failed: ${result.errorType} ${result.errorMessage ?? ""}`
-      );
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Scrape failed (${result.errorType}): ${result.errorMessage ?? "unknown error"}`,
-          },
-        ],
-      };
-    }
-
-    const transactions = (result.accounts ?? []).flatMap((account) =>
-      (account.txns ?? []).map((txn) => ({
-        account: account.accountNumber,
-        date: txn.date,
-        description: txn.description,
-        memo: txn.memo ?? null,
-        amount: txn.chargedAmount,
-        currency: txn.originalCurrency,
-        status: txn.status,
-        type: txn.type,
-      }))
-    );
-
-    console.error(`[moneymcp] fetched ${transactions.length} transactions`);
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              startDate: startDate.toISOString().slice(0, 10),
-              accountCount: result.accounts?.length ?? 0,
-              transactionCount: transactions.length,
-              transactions,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    };
+async function upsertRows(cfg: D1Config, rows: TxnRow[]): Promise<void> {
+  for (const r of rows) {
+    await d1Query(cfg, UPSERT_SQL, [
+      r.hash, r.account, r.date, r.description, r.memo, r.amount,
+      r.currency, r.status, r.type, r.category, r.scraped_at,
+    ]);
   }
-);
+}
+
+async function recordRun(
+  cfg: D1Config,
+  startedAt: string,
+  success: boolean,
+  inserted: number,
+  error: string | null
+): Promise<void> {
+  await d1Query(
+    cfg,
+    `INSERT INTO scrape_runs (started_at, finished_at, success, inserted, error)
+     VALUES (?,?,?,?,?)`,
+    [startedAt, new Date().toISOString(), success ? 1 : 0, inserted, error]
+  );
+}
 
 async function main(): Promise<void> {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("[moneymcp] server running on stdio");
+  const userCode = required("HAPOALIM_USER_CODE");
+  const password = required("HAPOALIM_PASSWORD");
+  const profileDir = process.env.BROWSER_PROFILE_DIR ?? "./.hapoalim-profile";
+  const daysBack = Number(process.env.DAYS_BACK ?? 10);
+  const cfg = d1ConfigFromEnv();
+
+  const startedAt = new Date().toISOString();
+  console.error(`[scraper] scraping Hapoalim, ${daysBack} days back, profile=${profileDir}`);
+
+  const scraper = createScraper({
+    companyId: CompanyTypes.hapoalim,
+    startDate: startDate(daysBack),
+    combineInstallments: false,
+    showBrowser: false,
+    timeout: 90000,
+    // Persistent profile keeps Hapoalim's device-trust between runs.
+    args: [`--user-data-dir=${profileDir}`],
+  });
+
+  const result = await scraper.scrape({ userCode, password });
+
+  if (!result.success) {
+    const msg = `${result.errorType}: ${result.errorMessage ?? ""}`.trim();
+    console.error(`[scraper] FAILED: ${msg}`);
+    await recordRun(cfg, startedAt, false, 0, msg).catch((e) =>
+      console.error("[scraper] failed to record run:", e)
+    );
+    process.exit(1);
+  }
+
+  const scrapedAt = new Date().toISOString();
+  const rows: TxnRow[] = (result.accounts ?? []).flatMap((acc) =>
+    (acc.txns ?? []).map((t) => txnToRow(acc.accountNumber, t as unknown as ScrapedTxn, scrapedAt))
+  );
+
+  console.error(`[scraper] upserting ${rows.length} transactions to D1...`);
+  await upsertRows(cfg, rows);
+  await recordRun(cfg, startedAt, true, rows.length, null);
+  console.error(`[scraper] done: ${rows.length} transactions.`);
 }
 
 main().catch((err) => {
-  console.error("[moneymcp] fatal error:", err);
+  console.error("[scraper] fatal:", err);
   process.exit(1);
 });
