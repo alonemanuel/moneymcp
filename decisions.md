@@ -6,6 +6,22 @@ When you make a non-trivial decision (architecture, dependency, data model, secu
 
 ---
 
+## 2026-06-26 — Multi-provider scraping; Isracard requires a visible browser
+
+**Decision:** The scraper supports multiple institutions (Hapoalim bank + Isracard & Max cards), each enabled by its own env credentials and scraped into the same D1, tagged with a `source` column. **Isracard must be scraped with a visible browser** (`SHOW_BROWSER=1`) plus `--disable-blink-features=AutomationControlled` and a logged-in profile.
+
+**Why:**
+- One unified store across bank + cards lets the agent answer "how much on my Isracard this month" and compare sources.
+- Isracard sits behind Akamai bot-protection: headless scraping returned `403` on the login page and `Failed to fetch` on the data call. A **visible** browser with the automation fingerprint hidden, reusing a manually-logged-in profile, scraped successfully (verified: 86 transactions).
+
+**Consequences:**
+- Isracard cannot run headless → it also can't run on a headless cloud runner as-is. For now data is loaded manually (visible browser on the Mac). Revisit for automation.
+- `source` column added to `transactions`; dedupe hash stays account-keyed (account numbers differ across providers), so re-scrapes upsert cleanly.
+
+**Status:** Hapoalim ✅ live, Isracard ✅ loaded, Max ⏸️ parked (login `TIMEOUT` — likely needs the same one-time browser login, deferred at user's request).
+
+---
+
 ## 2026-06-26 — Architecture: scheduled-scrape-into-store + remote MCP (cloud, free-tier)
 
 **Decision:** Split moneymcp into three decoupled cloud parts: (1) a **scraper** that runs on a schedule and writes transactions into (2) a **store**, which (3) a **remote MCP server** reads to answer queries. Querying never touches the bank. Concrete free-tier stack: **GitHub Actions** (scraper cron) + **Cloudflare D1** (SQLite store) + **Cloudflare Workers** (MCP server, Streamable HTTP) + **Telegram** (OTP relay). The Claude app reaches it as a custom connector.

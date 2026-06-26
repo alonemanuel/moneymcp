@@ -29,6 +29,7 @@ const TOOLS = [
       properties: {
         from: { type: "string", description: "Start date (ISO, e.g. 2026-06-01). Default: first of the current month." },
         to: { type: "string", description: "End date (ISO). Default: today." },
+        source: { type: "string", description: "Filter to one institution: hapoalim | isracard | max. Omit for all." },
         limit: { type: "integer", minimum: 1, maximum: 1000, description: "Max rows (default 200)." },
       },
     },
@@ -45,6 +46,7 @@ const TOOLS = [
         maxAmount: { type: "number", description: "Maximum amount." },
         from: { type: "string", description: "Start date (ISO)." },
         to: { type: "string", description: "End date (ISO)." },
+        source: { type: "string", description: "Filter to one institution: hapoalim | isracard | max. Omit for all." },
         limit: { type: "integer", minimum: 1, maximum: 1000, description: "Max rows (default 200)." },
       },
     },
@@ -85,16 +87,17 @@ async function getTransactions(env: Env, args: Args) {
   const from = (args.from as string) ?? firstOfThisMonth();
   const to = (args.to as string) ?? today();
   const limit = Math.min(Number(args.limit) || 200, 1000);
+  const source = args.source as string | undefined;
   const { results } = await env.DB.prepare(
-    `SELECT account, date, description, memo, amount, currency, status, type, category
+    `SELECT source, account, date, description, memo, amount, currency, status, type, category
        FROM transactions
-      WHERE date >= ?1 AND date <= ?2
+      WHERE date >= ?1 AND date <= ?2 AND (?3 IS NULL OR source = ?3)
       ORDER BY date DESC
-      LIMIT ?3`
+      LIMIT ?4`
   )
-    .bind(from, to, limit)
+    .bind(from, to, source ?? null, limit)
     .all();
-  return { from, to, count: results.length, transactions: results };
+  return { from, to, source: source ?? "all", count: results.length, transactions: results };
 }
 
 async function searchTransactions(env: Env, args: Args) {
@@ -122,11 +125,15 @@ async function searchTransactions(env: Env, args: Args) {
     conds.push(`date <= ?${i++}`);
     binds.push(args.to);
   }
+  if (args.source) {
+    conds.push(`source = ?${i++}`);
+    binds.push(args.source);
+  }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const limit = Math.min(Number(args.limit) || 200, 1000);
   binds.push(limit);
   const { results } = await env.DB.prepare(
-    `SELECT account, date, description, memo, amount, currency, status, type, category
+    `SELECT source, account, date, description, memo, amount, currency, status, type, category
        FROM transactions ${where}
       ORDER BY date DESC
       LIMIT ?${i}`
@@ -161,7 +168,19 @@ async function getFinancialSummary(env: Env, args: Args) {
   )
     .bind(from, to)
     .all();
-  return { from, to, totals, spend_by_category: byCategory };
+  const { results: bySource } = await env.DB.prepare(
+    `SELECT COALESCE(source, 'unknown') AS source,
+            ROUND(SUM(CASE WHEN amount > 0 THEN amount END), 2) AS total_in,
+            ROUND(SUM(CASE WHEN amount < 0 THEN amount END), 2) AS total_out,
+            COUNT(*) AS count
+       FROM transactions
+      WHERE date >= ?1 AND date <= ?2
+      GROUP BY source
+      ORDER BY total_out ASC`
+  )
+    .bind(from, to)
+    .all();
+  return { from, to, totals, spend_by_category: byCategory, by_source: bySource };
 }
 
 async function getScrapeStatus(env: Env) {

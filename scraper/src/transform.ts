@@ -16,6 +16,7 @@ export interface ScrapedTxn {
 /** A row as stored in D1 (matches worker/schema.sql `transactions`). */
 export interface TxnRow {
   hash: string;
+  source: string;
   account: string;
   date: string;
   description: string;
@@ -39,9 +40,17 @@ export function txnHash(account: string, txn: ScrapedTxn): string {
   return createHash("sha256").update(basis).digest("hex").slice(0, 24);
 }
 
-export function txnToRow(account: string, txn: ScrapedTxn, scrapedAt: string): TxnRow {
+export function txnToRow(
+  source: string,
+  account: string,
+  txn: ScrapedTxn,
+  scrapedAt: string
+): TxnRow {
   return {
+    // Hash basis stays account-keyed (account numbers differ across providers),
+    // so re-scrapes upsert cleanly and don't duplicate.
     hash: txnHash(account, txn),
+    source,
     account,
     date: txn.date,
     description: txn.description,

@@ -14,9 +14,11 @@ build/
 # Cloudflare Wrangler local state
 .wrangler/
 
-# Trusted bank browser session — NEVER commit (holds live bank cookies)
+# Trusted bank browser sessions — NEVER commit (hold live bank cookies)
 .hapoalim-profile/
 *.hapoalim-profile
+.profiles/
+**/.profiles/
 
 # Logs
 *.log

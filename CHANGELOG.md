@@ -10,6 +10,10 @@ Categories: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 
 ## [Unreleased]
 
+### Added
+- **Multi-provider scraping** (`scraper/providers.ts`): Hapoalim + Isracard + Max, each enabled by its own env credentials, scraped into one D1 and tagged with a new `source` column. MCP tools now surface `source`, support a `source` filter, and the summary includes a by-source breakdown. (2026-06-26)
+- **Isracard loaded** (86 transactions): required a visible browser (`SHOW_BROWSER=1`) + `--disable-blink-features=AutomationControlled` + logged-in profile to beat Akamai bot-protection. Generalized `login.ts` to bootstrap any provider's trusted session. See [decisions.md](./decisions.md). (2026-06-26)
+
 ### Changed
 - **Major architecture pivot (2026-06-26):** from a local stdio live-scraper to a **cloud, free-tier, store-backed** design — GitHub Actions scraper → Cloudflare D1 (SQLite) → Cloudflare Workers MCP server (Streamable HTTP), reachable from the Claude mobile app as a custom connector, with a Telegram OTP relay for Hapoalim's SMS 2FA. Supersedes the local-only and stdio decisions. See [decisions.md](./decisions.md).
 - Discovered Hapoalim enforces new-device SMS 2FA on every login (verified via a real scrape attempt + failure screenshot); credentials confirmed valid. This drove the decoupled scrape/store/query design.

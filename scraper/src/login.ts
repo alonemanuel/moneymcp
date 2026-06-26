@@ -14,13 +14,26 @@
  */
 import puppeteer from "puppeteer";
 
-const profileDir = process.env.BROWSER_PROFILE_DIR ?? "./.hapoalim-profile";
-const LOGIN_URL = "https://login.bankhapoalim.co.il/";
+/** Per-provider login page + default profile dir (matches providers.ts). */
+const PROVIDERS: Record<string, { url: string; profile: string; label: string }> = {
+  hapoalim: { url: "https://login.bankhapoalim.co.il/", profile: "./.hapoalim-profile", label: "Bank Hapoalim" },
+  max: { url: "https://www.max.co.il/", profile: "./.profiles/max", label: "Max" },
+  isracard: { url: "https://digital.isracard.co.il/", profile: "./.profiles/isracard", label: "Isracard" },
+};
+
+const provider = process.env.LOGIN_PROVIDER ?? process.argv[2] ?? "hapoalim";
+const cfg = PROVIDERS[provider];
+if (!cfg) {
+  console.error(`Unknown provider "${provider}". Use one of: ${Object.keys(PROVIDERS).join(", ")}`);
+  process.exit(1);
+}
+const profileDir = process.env.BROWSER_PROFILE_DIR ?? cfg.profile;
+const LOGIN_URL = cfg.url;
 const MAX_WAIT_MS = Number(process.env.LOGIN_WAIT_MS ?? 5 * 60 * 1000); // 5 min safety cap
 
 async function main(): Promise<void> {
-  console.log(`\nOpening a browser using profile: ${profileDir}`);
-  console.log("1) Log in to Bank Hapoalim and complete the SMS code.");
+  console.log(`\nOpening a browser for ${cfg.label} using profile: ${profileDir}`);
+  console.log(`1) Log in to ${cfg.label} (complete any SMS code if asked).`);
   console.log("2) Reach your account overview (so the device is trusted).");
   console.log("3) Then just CLOSE the browser window — the session saves automatically.\n");
 

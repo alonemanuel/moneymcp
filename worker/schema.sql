@@ -3,6 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS transactions (
   hash         TEXT PRIMARY KEY,   -- dedupe key: account|date|amount|identifier
+  source       TEXT,               -- institution: hapoalim | isracard | max | ...
   account      TEXT,               -- account number / id
   date         TEXT NOT NULL,      -- ISO date (yyyy-mm-dd or full ISO)
   description  TEXT,

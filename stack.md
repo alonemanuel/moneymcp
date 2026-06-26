@@ -45,7 +45,7 @@ See [decisions.md](./decisions.md) → "Architecture: scheduled-scrape-into-stor
 |-----------|------|----------------|--------|
 | MCP server | TS, Streamable-HTTP JSON-RPC (hand-rolled, no Durable Objects) | **Cloudflare Workers** | ✅ **deployed**: `https://moneymcp.alonemanuel95.workers.dev` (auth via `?key=` or Bearer) |
 | Store | SQLite (schema `worker/schema.sql`) | **Cloudflare D1** | ✅ **provisioned** (`moneymcp`, id `d6e10474…`); loaded with real data |
-| Scraper | Node + Puppeteer + `israeli-bank-scrapers` | **GitHub Actions** (scheduled workflow) | ✅ code built + typechecked (`scraper/`); 🟡 bank+D1 path not yet verified e2e; 🟡 no GH Actions workflow yet |
+| Scraper | Node + Puppeteer + `israeli-bank-scrapers`; multi-provider (`scraper/providers.ts`) | run manually on Mac (cloud cron deferred) | ✅ Hapoalim + Isracard verified, loaded to D1; Max parked; 🟡 no scheduled cron yet |
 | OTP relay / notifications | Telegram Bot API | **Telegram** (free) | 🟡 |
 | Client connector | Custom connector (remote MCP) | **Claude app** (Free/Pro/Max) | 🟡 |
 
@@ -93,7 +93,7 @@ Everything sensitive lives as **cloud secrets**, never in code or logs:
 
 | Secret | Where | Purpose | Status |
 |--------|-------|---------|--------|
-| `HAPOALIM_USER_CODE`, `HAPOALIM_PASSWORD` | GitHub Actions secrets | Bank login (scraper only) | 🟡 |
+| `HAPOALIM_USER_CODE`/`PASSWORD`; `ISRACARD_ID`/`CARD6`/`PASSWORD`; `MAX_USERNAME`/`PASSWORD` | env / GitHub Actions secrets | Per-provider login (scraper only). A provider scrapes only if all its vars are set. | ✅ used locally |
 | Trusted browser profile (cookies/localStorage) | Encrypted GitHub secret / Actions cache | Keeps Hapoalim treating the scraper as a known device → fewer OTP challenges | 🟡 |
 | `D1` write credentials (Cloudflare API token + account/DB id) | GitHub Actions secrets | Scraper writes to D1 via the D1 HTTP API | 🟡 |
 | `MCP_AUTH_TOKEN` | Cloudflare Worker secret | Gates the MCP endpoint | 🟡 |
