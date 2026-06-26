@@ -9,6 +9,10 @@ build/
 .env
 .env.*
 !.env.example
+.dev.vars
+
+# Cloudflare Wrangler local state
+.wrangler/
 
 # Logs
 *.log

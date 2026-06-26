@@ -1,0 +1,12 @@
+name = "moneymcp"
+main = "worker/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare D1 (SQLite). database_id is filled in at provisioning time
+# (`wrangler d1 create moneymcp`). Local dev (`wrangler dev`) uses local state
+# and ignores the id.
+[[d1_databases]]
+binding = "DB"
+database_name = "moneymcp"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
