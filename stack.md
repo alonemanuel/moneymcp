@@ -45,7 +45,7 @@ See [decisions.md](./decisions.md) → "Architecture: scheduled-scrape-into-stor
 |-----------|------|----------------|--------|
 | MCP server | TS, Streamable-HTTP JSON-RPC (hand-rolled, no Durable Objects) | **Cloudflare Workers** | ✅ built + locally tested (`worker/index.ts`); 🟡 not yet deployed |
 | Store | SQLite (schema `worker/schema.sql`) | **Cloudflare D1** | ✅ built + locally tested; 🟡 not yet provisioned in cloud |
-| Scraper | Node + Puppeteer + `israeli-bank-scrapers` | **GitHub Actions** (scheduled workflow) | 🟡 |
+| Scraper | Node + Puppeteer + `israeli-bank-scrapers` | **GitHub Actions** (scheduled workflow) | ✅ code built + typechecked (`scraper/`); 🟡 bank+D1 path not yet verified e2e; 🟡 no GH Actions workflow yet |
 | OTP relay / notifications | Telegram Bot API | **Telegram** (free) | 🟡 |
 | Client connector | Custom connector (remote MCP) | **Claude app** (Free/Pro/Max) | 🟡 |
 

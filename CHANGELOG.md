@@ -17,7 +17,9 @@ Categories: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 ### Added
 - **Remote MCP server** (`worker/index.ts`): Cloudflare Worker speaking MCP Streamable HTTP (hand-rolled JSON-RPC, bearer-token auth), exposing read tools `get_transactions`, `search_transactions`, `get_financial_summary`, `get_scrape_status` backed by Cloudflare D1. Built and **verified locally** via `wrangler dev` + seeded local D1 (full MCP handshake + each tool). Not yet deployed. (2026-06-26)
 - **D1 schema** (`worker/schema.sql`): `transactions` (dedupe-hash keyed) + `scrape_runs`; local seed data (`worker/seed.sql`). (2026-06-26)
-- Repo restructured into `worker/` (Cloudflare Worker) and `scraper/` (Node scraper, WIP); removed dead Python scaffold `main.py`. (2026-06-26)
+- **Scraper** (`scraper/`): scheduled Hapoalim scraper that upserts into D1 over the D1 REST API, with a stable dedupe hash (unit-tested), a D1 HTTP client, and a one-time trusted-session login bootstrap (`scraper/src/login.ts`) for Hapoalim's SMS 2FA. Code-complete + typechecks; bank/D1 path not yet verified end-to-end. (2026-06-26)
+- Dropped unused deps `@modelcontextprotocol/sdk` and `zod` (the Worker hand-rolls JSON-RPC); added `puppeteer`. npm scripts for scrape/login/worker. (2026-06-26)
+- Repo restructured into `worker/` (Cloudflare Worker) and `scraper/` (Node scraper); removed dead Python scaffold `main.py`. (2026-06-26)
 - **POC (superseded)** stdio MCP server scraping Hapoalim live — relocated to `scraper/` as the basis for the scheduled scraper. (2026-06-26)
 - TypeScript project setup: `package.json`, `tsconfig.json`, build (`tsc`) / dev (`tsx`) scripts, `.env.example`. (2026-06-26)
 - Dependencies: `@modelcontextprotocol/sdk`, `israeli-bank-scrapers`, `zod`. (2026-06-26)
