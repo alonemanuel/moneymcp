@@ -250,16 +250,25 @@ export default {
       return new Response(null, { headers: CORS });
     }
 
-    // Health check / friendly GET.
+    // Health check / friendly GET. If the client is opening an SSE stream
+    // (Streamable HTTP server->client channel), we don't offer one — signal
+    // that with 405 per spec. Otherwise return a small health payload.
     if (request.method === "GET") {
+      const accept = request.headers.get("Accept") ?? "";
+      if (accept.includes("text/event-stream")) {
+        return new Response("SSE stream not supported", { status: 405, headers: CORS });
+      }
       return new Response(JSON.stringify({ ok: true, server: SERVER_INFO }), {
         headers: { "Content-Type": "application/json", ...CORS },
       });
     }
 
-    // Auth: Bearer token.
+    // Auth: Bearer token in the Authorization header, or a `key` query param
+    // (the Claude app connector UI can't set headers, so the token rides in
+    // the connector URL).
     const auth = request.headers.get("Authorization") ?? "";
-    const token = auth.replace(/^Bearer\s+/i, "");
+    const url = new URL(request.url);
+    const token = auth.replace(/^Bearer\s+/i, "") || (url.searchParams.get("key") ?? "");
     if (!env.MCP_AUTH_TOKEN || token !== env.MCP_AUTH_TOKEN) {
       return new Response(JSON.stringify(rpcError(null, -32001, "Unauthorized")), {
         status: 401,

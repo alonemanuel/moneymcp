@@ -9,4 +9,4 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "moneymcp"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "d6e10474-285a-4091-90ec-388b300922cf"

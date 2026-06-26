@@ -62,11 +62,13 @@ async function recordRun(
 }
 
 async function main(): Promise<void> {
+  const dryRun = process.argv.includes("--dry-run");
   const userCode = required("HAPOALIM_USER_CODE");
   const password = required("HAPOALIM_PASSWORD");
   const profileDir = process.env.BROWSER_PROFILE_DIR ?? "./.hapoalim-profile";
   const daysBack = Number(process.env.DAYS_BACK ?? 10);
-  const cfg = d1ConfigFromEnv();
+  // In dry-run we only scrape + print — no D1 write, so no cloud creds needed.
+  const cfg = dryRun ? null : d1ConfigFromEnv();
 
   const startedAt = new Date().toISOString();
   console.error(`[scraper] scraping Hapoalim, ${daysBack} days back, profile=${profileDir}`);
@@ -86,9 +88,11 @@ async function main(): Promise<void> {
   if (!result.success) {
     const msg = `${result.errorType}: ${result.errorMessage ?? ""}`.trim();
     console.error(`[scraper] FAILED: ${msg}`);
-    await recordRun(cfg, startedAt, false, 0, msg).catch((e) =>
-      console.error("[scraper] failed to record run:", e)
-    );
+    if (cfg) {
+      await recordRun(cfg, startedAt, false, 0, msg).catch((e) =>
+        console.error("[scraper] failed to record run:", e)
+      );
+    }
     process.exit(1);
   }
 
@@ -96,6 +100,12 @@ async function main(): Promise<void> {
   const rows: TxnRow[] = (result.accounts ?? []).flatMap((acc) =>
     (acc.txns ?? []).map((t) => txnToRow(acc.accountNumber, t as unknown as ScrapedTxn, scrapedAt))
   );
+
+  if (!cfg) {
+    console.error(`[scraper] DRY RUN — scraped ${rows.length} transactions (not writing to D1):`);
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
 
   console.error(`[scraper] upserting ${rows.length} transactions to D1...`);
   await upsertRows(cfg, rows);

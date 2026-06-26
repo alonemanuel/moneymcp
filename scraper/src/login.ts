@@ -16,19 +16,13 @@ import puppeteer from "puppeteer";
 
 const profileDir = process.env.BROWSER_PROFILE_DIR ?? "./.hapoalim-profile";
 const LOGIN_URL = "https://login.bankhapoalim.co.il/";
-
-function waitForEnter(): Promise<void> {
-  return new Promise((resolve) => {
-    process.stdin.resume();
-    process.stdin.once("data", () => resolve());
-  });
-}
+const MAX_WAIT_MS = Number(process.env.LOGIN_WAIT_MS ?? 5 * 60 * 1000); // 5 min safety cap
 
 async function main(): Promise<void> {
   console.log(`\nOpening a browser using profile: ${profileDir}`);
   console.log("1) Log in to Bank Hapoalim and complete the SMS code.");
   console.log("2) Reach your account overview (so the device is trusted).");
-  console.log("3) Come back here and press Enter to save the session and close.\n");
+  console.log("3) Then just CLOSE the browser window — the session saves automatically.\n");
 
   const browser = await puppeteer.launch({
     headless: false,
@@ -41,11 +35,17 @@ async function main(): Promise<void> {
     waitUntil: "domcontentloaded",
   });
 
-  await waitForEnter();
-  await browser.close();
+  // Resolve when the user closes the browser, or after a safety timeout.
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, MAX_WAIT_MS);
+    browser.on("disconnected", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  if (browser.connected) await browser.close().catch(() => {});
 
   console.log(`\nSaved. Trusted profile persisted at: ${profileDir}`);
-  console.log("Next: archive it and store as the GitHub secret the scraper restores.\n");
 }
 
 main().catch((err) => {
