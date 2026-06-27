@@ -11,6 +11,7 @@ Categories: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 ## [Unreleased]
 
 ### Added
+- **Balances + per-account history** (2026-06-27): scraper captures account balance snapshots (`balances` table); `get_balances` tool; dashboard shows balance + last-transaction per account and an expandable per-account sync history (rows/status/duration). Scrape cron reduced to once daily.
 - **Web dashboard** (`/app`, 2026-06-27): Google-login-gated page showing connected institutions, per-account status + last sync, transaction count, and a **"Sync now"** button that triggers the scrape via GitHub `workflow_dispatch` (Worker → GitHub API). Live progress polled from `sync_runs`. Session via signed cookie + KV; reuses the existing Google client.
 - **Sync engine**: `connections` (per-user linked institutions) + `sync_runs` (live progress) tables; scraper writes live per-account progress and finalizes done/error; new `get_connections` tool and `latest_sync` in `get_scrape_status`.
 - **Multi-user via OAuth 2.1 (Google login), LIVE** (2026-06-27): MCP moved to `/mcp`, protected by `@cloudflare/workers-oauth-provider` (DCR + PKCE + discovery), identity delegated to Google. Verified email → `users` row (auto-provisioned on first login); every query scoped to `ctx.props.userId`. Per-user data isolation (`user_id` on transactions; existing data → `alon`). Supersedes the single-user `?key=` token. KV `OAUTH_KV` for tokens; Google client id/secret as Worker secrets.
