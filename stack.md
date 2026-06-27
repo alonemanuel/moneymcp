@@ -45,7 +45,7 @@ See [decisions.md](./decisions.md) → "Architecture: scheduled-scrape-into-stor
 |-----------|------|----------------|--------|
 | MCP server | TS, Streamable-HTTP JSON-RPC (hand-rolled, no Durable Objects) | **Cloudflare Workers** | ✅ **deployed**: `https://moneymcp.alonemanuel95.workers.dev` (auth via `?key=` or Bearer) |
 | Store | SQLite (schema `worker/schema.sql`) | **Cloudflare D1** | ✅ **provisioned** (`moneymcp`, id `d6e10474…`); loaded with real data |
-| Scraper | Node + Puppeteer + `israeli-bank-scrapers`; multi-provider (`scraper/providers.ts`) | run manually on Mac (cloud cron deferred) | ✅ Hapoalim + Isracard verified, loaded to D1; Max parked; 🟡 no scheduled cron yet |
+| Scraper | Node + Puppeteer + `israeli-bank-scrapers`; multi-provider (`scraper/providers.ts`) | **GitHub Actions** (`.github/workflows/scrape.yml`, twice daily) | ✅ **Hapoalim auto-refresh LIVE** → D1, free, no OTP. Isracard works but needs visible browser (manual). Max parked. |
 | OTP relay / notifications | Telegram Bot API | **Telegram** (free) | 🟡 |
 | Client connector | Custom connector (remote MCP) | **Claude app** (Free/Pro/Max) | 🟡 |
 
