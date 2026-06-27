@@ -13,7 +13,7 @@ on:
         required: false
         default: "alon"
   schedule:
-    - cron: "5 6,18 * * *" # twice daily (UTC)
+    - cron: "5 6 * * *" # once daily (UTC)
 
 jobs:
   scrape:

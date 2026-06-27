@@ -77,7 +77,13 @@ const TOOLS = [
   {
     name: "get_connections",
     description:
-      "List the financial institutions this user has connected (source, status: connected/error, last sync time). An empty list means no accounts are connected yet.",
+      "List the financial institutions this user has connected (source, status, last sync time, last transaction date, current balance). An empty list means no accounts are connected yet.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_balances",
+    description:
+      "Current account balances (latest snapshot per account), captured at each sync. Use for 'how much do I have' / net worth questions.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
@@ -226,12 +232,42 @@ async function getScrapeStatus(env: Env, userId: string) {
 
 async function getConnections(env: Env, userId: string) {
   const { results } = await env.DB.prepare(
-    `SELECT source, status, last_sync_at, last_error FROM connections
-      WHERE user_id = ?1 ORDER BY source`
+    `SELECT c.source, c.status, c.last_sync_at, c.last_error,
+            (SELECT MAX(t.date) FROM transactions t
+               WHERE t.user_id = c.user_id AND t.source = c.source) AS last_transaction,
+            (SELECT b.balance FROM balances b
+               WHERE b.user_id = c.user_id AND b.source = c.source
+               ORDER BY b.id DESC LIMIT 1) AS balance
+       FROM connections c
+      WHERE c.user_id = ?1 ORDER BY c.source`
   )
     .bind(userId)
     .all();
   return { count: results.length, connections: results };
+}
+
+async function getBalances(env: Env, userId: string) {
+  // Latest balance snapshot per source/account.
+  const { results } = await env.DB.prepare(
+    `SELECT source, account, balance, scraped_at FROM balances b
+      WHERE user_id = ?1 AND id IN (
+        SELECT MAX(id) FROM balances WHERE user_id = ?1 GROUP BY source, account
+      ) ORDER BY source`
+  )
+    .bind(userId)
+    .all();
+  return { count: results.length, balances: results };
+}
+
+async function getSyncHistory(env: Env, userId: string, source: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT source, status, inserted, started_at, finished_at
+       FROM sync_runs WHERE user_id = ?1 AND source = ?2
+      ORDER BY id DESC LIMIT 20`
+  )
+    .bind(userId, source)
+    .all();
+  return results;
 }
 
 async function callTool(env: Env, userId: string, name: string, args: Args) {
@@ -246,6 +282,8 @@ async function callTool(env: Env, userId: string, name: string, args: Args) {
       return getScrapeStatus(env, userId);
     case "get_connections":
       return getConnections(env, userId);
+    case "get_balances":
+      return getBalances(env, userId);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -438,52 +476,69 @@ const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8">
 <title>moneymcp</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#1a1d23;background:#fff}
-  h1{font-size:1.4rem}.muted{color:#6b7280;font-size:.85rem}
-  .card{border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin:.6rem 0;display:flex;justify-content:space-between;align-items:center}
-  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:.4rem}
+  h1{font-size:1.4rem;margin-bottom:.2rem}.muted{color:#6b7280;font-size:.85rem}
+  .acct{border:1px solid #e5e7eb;border-radius:10px;margin:.6rem 0;overflow:hidden}
+  .hdr{padding:.9rem 1rem;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+  .hdr:hover{background:#f9fafb}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:.5rem}
   .ok{background:#22c55e}.err{background:#ef4444}.none{background:#9ca3af}
-  button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.6rem 1rem;font-size:1rem;cursor:pointer}
+  .bal{font-variant-numeric:tabular-nums;font-weight:600}
+  .detail{padding:0 1rem;border-top:1px solid #f0f0f0}
+  table{width:100%;border-collapse:collapse;font-size:.82rem;margin:.4rem 0}
+  th,td{text-align:left;padding:.35rem .3rem;border-bottom:1px solid #f3f4f6}
+  th{color:#6b7280;font-weight:500}
+  button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.6rem 1rem;font-size:1rem;cursor:pointer;margin-top:.5rem}
   button:disabled{opacity:.5;cursor:default}
   #status{margin-top:.8rem;font-size:.9rem;color:#374151;min-height:1.2em}
-  code{background:#f3f4f6;padding:.1rem .3rem;border-radius:4px}
 </style></head><body>
 <h1>moneymcp</h1>
 <div class="muted" id="who"></div>
 <div id="conns"></div>
-<p><button id="sync" onclick="sync()">Sync now</button></p>
+<button id="sync" onclick="doSync()">Sync now</button>
 <div id="status"></div>
 <script>
-function fmt(t){ if(!t) return 'never'; var d=new Date(t); return isNaN(d)?t:d.toLocaleString(); }
+var $=function(id){return document.getElementById(id);};
+var expanded={};
+function fmt(t){ if(!t) return '—'; var d=new Date(t); return isNaN(d)?t:d.toLocaleString(); }
+function money(n){ return (n==null)?'—':'₪'+Number(n).toLocaleString(undefined,{maximumFractionDigits:2}); }
+function esc(s){ return String(s).replace(/[<>&]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}); }
 async function load(){
-  var r = await fetch('/app/api/status'); if(!r.ok){ document.getElementById('status').textContent='Session expired — reload.'; return; }
-  var d = await r.json();
-  document.getElementById('who').textContent = d.email;
-  var html = '';
-  if(!d.connections || d.connections.length===0){
-    html = '<div class="card"><span><span class="dot none"></span>No accounts connected yet</span></div>';
+  var r=await fetch('/app/api/status'); if(!r.ok){ $('status').textContent='Session expired — reload the page.'; return; }
+  var d=await r.json();
+  $('who').textContent=d.email;
+  var html='';
+  if(!d.connections||d.connections.length===0){
+    html='<div class="acct"><div class="hdr"><span><span class="dot none"></span>No accounts connected yet</span></div></div>';
   } else {
     d.connections.forEach(function(c){
-      var cls = c.status==='connected'?'ok':(c.status==='error'?'err':'none');
-      html += '<div class="card"><span><span class="dot '+cls+'"></span><b>'+c.source+'</b> — '+c.status+'</span>'
-            + '<span class="muted">last sync '+fmt(c.last_sync_at)+'</span></div>';
+      var cls=c.status==='connected'?'ok':(c.status==='error'?'err':'none');
+      html+='<div class="acct"><div class="hdr" onclick="toggle(\\''+c.source+'\\')">'
+        +'<span><span class="dot '+cls+'"></span><b>'+esc(c.source)+'</b></span>'
+        +'<span class="bal">'+money(c.balance)+' <span class="muted">· last txn '+fmt(c.last_transaction)+'</span></span>'
+        +'</div><div class="detail" id="d_'+c.source+'"></div></div>';
     });
   }
-  document.getElementById('conns').innerHTML = html;
-  var s = d.latest_sync;
-  if(s){
-    var line = s.status==='running' ? '⏳ syncing… '+(s.detail||'') : (s.status==='done' ? '✓ last sync: '+(s.detail||'')+' ('+fmt(s.finished_at)+')' : '⚠️ '+(s.detail||s.status));
-    document.getElementById('status').textContent = line;
-    document.getElementById('sync').disabled = (s.status==='running');
-  }
-  document.getElementById('status').textContent += ' · '+(d.transaction_count||0)+' transactions';
+  $('conns').innerHTML=html;
+  Object.keys(expanded).forEach(function(s){ if(expanded[s]) loadSyncs(s); });
+  var s=d.latest_sync, line='';
+  if(s){ line = s.status==='running' ? ('⏳ syncing '+(s.source||'')+'…') : (s.status==='done' ? '✓ synced' : '⚠️ '+(s.detail||s.status)); }
+  $('status').textContent=(line?line+' · ':'')+(d.transaction_count||0)+' transactions';
+  $('sync').disabled = !!(s && s.status==='running');
 }
-async function sync(){
-  document.getElementById('sync').disabled = true;
-  document.getElementById('status').textContent = 'Queued… (a scrape takes ~1–2 min to start)';
-  await fetch('/app/sync', {method:'POST'});
-  poll();
+function toggle(src){ expanded[src]=!expanded[src]; if(expanded[src]) loadSyncs(src); else { var e=$('d_'+src); if(e) e.innerHTML=''; } }
+async function loadSyncs(src){
+  var el=$('d_'+src); if(!el) return; if(!el.innerHTML) el.innerHTML='<div class="muted">loading…</div>';
+  var r=await fetch('/app/api/syncs?source='+encodeURIComponent(src)); var a=await r.json();
+  if(!a.length){ el.innerHTML='<div class="muted" style="padding:.5rem 0">no syncs yet</div>'; return; }
+  var t='<table><tr><th>started</th><th>rows</th><th>status</th><th>duration</th></tr>';
+  a.forEach(function(x){
+    var dur=(x.started_at&&x.finished_at)?Math.max(0,Math.round((new Date(x.finished_at)-new Date(x.started_at))/1000))+'s':'—';
+    t+='<tr><td>'+fmt(x.started_at)+'</td><td>'+(x.inserted==null?'—':x.inserted)+'</td><td>'+esc(x.status)+'</td><td>'+dur+'</td></tr>';
+  });
+  el.innerHTML=t+'</table>';
 }
-function poll(){ load(); setTimeout(poll, 4000); }
+async function doSync(){ $('sync').disabled=true; $('status').textContent='Queued… (a scrape takes ~1–2 min to start)'; await fetch('/app/sync',{method:'POST'}); poll(); }
+function poll(){ load(); setTimeout(poll,4000); }
 poll();
 </script></body></html>`;
 
@@ -579,6 +634,15 @@ const defaultHandler = {
       const conns = await getConnections(env, sess.userId);
       const status = await getScrapeStatus(env, sess.userId);
       return new Response(JSON.stringify({ email: sess.email, ...conns, ...status }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.pathname === "/app/api/syncs") {
+      const sess = await getSession(request, env);
+      if (!sess) return new Response("unauthorized", { status: 401 });
+      const source = url.searchParams.get("source") ?? "";
+      const history = await getSyncHistory(env, sess.userId, source);
+      return new Response(JSON.stringify(history), {
         headers: { "Content-Type": "application/json" },
       });
     }

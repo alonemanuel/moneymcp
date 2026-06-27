@@ -43,19 +43,15 @@ async function upsertRows(cfg: D1Config, rows: TxnRow[]): Promise<void> {
   }
 }
 
-// --- per-user sync status (drives the dashboard's live progress) ---
+// --- per-account sync status (one sync_runs row per provider per run) ---
 
-async function syncStart(cfg: D1Config, userId: string): Promise<number> {
+async function syncStart(cfg: D1Config, userId: string, source: string): Promise<number> {
   const res = await d1Query(
     cfg,
-    `INSERT INTO sync_runs (user_id, status, detail, started_at) VALUES (?,?,?,?)`,
-    [userId, "running", "starting", new Date().toISOString()]
+    `INSERT INTO sync_runs (user_id, source, status, started_at) VALUES (?,?,?,?)`,
+    [userId, source, "running", new Date().toISOString()]
   );
   return Number((res[0]?.meta as any)?.last_row_id ?? 0);
-}
-
-async function syncUpdate(cfg: D1Config, id: number, detail: string): Promise<void> {
-  await d1Query(cfg, `UPDATE sync_runs SET detail = ?1 WHERE id = ?2`, [detail, id]);
 }
 
 async function syncFinish(
@@ -63,13 +59,31 @@ async function syncFinish(
   id: number,
   status: "done" | "error",
   inserted: number,
-  detail: string
+  detail: string | null
 ): Promise<void> {
   await d1Query(
     cfg,
     `UPDATE sync_runs SET status=?1, inserted=?2, detail=?3, finished_at=?4 WHERE id=?5`,
     [status, inserted, detail, new Date().toISOString(), id]
   );
+}
+
+/** Record an account-balance snapshot per account (a point-in-time detail beyond transactions). */
+async function recordBalances(
+  cfg: D1Config,
+  userId: string,
+  source: string,
+  balances: { account: string; balance: number | null }[],
+  scrapedAt: string
+): Promise<void> {
+  for (const b of balances) {
+    if (b.balance == null) continue;
+    await d1Query(
+      cfg,
+      `INSERT INTO balances (user_id, source, account, balance, scraped_at) VALUES (?,?,?,?,?)`,
+      [userId, source, b.account, b.balance, scrapedAt]
+    );
+  }
 }
 
 async function upsertConnection(
@@ -92,8 +106,13 @@ async function upsertConnection(
   );
 }
 
-/** Scrape one provider into rows. Throws on failure. */
-async function scrapeProvider(provider: Provider, userId: string, daysBack: number): Promise<TxnRow[]> {
+interface ScrapeResult {
+  rows: TxnRow[];
+  balances: { account: string; balance: number | null }[];
+}
+
+/** Scrape one provider. Throws on failure. Returns transactions + balance snapshots. */
+async function scrapeProvider(provider: Provider, userId: string, daysBack: number): Promise<ScrapeResult> {
   console.error(`[scraper] ${provider.source}: scraping ${daysBack} days back...`);
   const args = [
     `--user-data-dir=${provider.profileDir}`,
@@ -126,13 +145,18 @@ async function scrapeProvider(provider: Provider, userId: string, daysBack: numb
   }
 
   const scrapedAt = new Date().toISOString();
-  const rows = (result.accounts ?? []).flatMap((acc) =>
+  const accounts = result.accounts ?? [];
+  const rows = accounts.flatMap((acc) =>
     (acc.txns ?? []).map((t) =>
       txnToRow(userId, provider.source, acc.accountNumber, t as unknown as ScrapedTxn, scrapedAt)
     )
   );
+  const balances = accounts.map((acc) => ({
+    account: acc.accountNumber,
+    balance: (acc as unknown as { balance?: number }).balance ?? null,
+  }));
   console.error(`[scraper] ${provider.source}: ${rows.length} transactions`);
-  return rows;
+  return { rows, balances };
 }
 
 async function main(): Promise<void> {
@@ -146,30 +170,29 @@ async function main(): Promise<void> {
   console.error(`[scraper] providers: ${providers.map((p) => p.source).join(", ")}`);
   const cfg = dryRun ? null : d1ConfigFromEnv();
 
-  // Open a sync_runs row so the dashboard can show live progress.
-  const syncId = cfg ? await syncStart(cfg, userId) : 0;
-
-  // Scrape each provider independently so one failure doesn't lose the others.
+  // Scrape each provider independently — one sync_runs row PER provider, so the
+  // dashboard can show per-account sync history (count + start/end timestamps).
   const allRows: TxnRow[] = [];
   const failures: string[] = [];
-  const details: string[] = [];
   for (const provider of providers) {
+    const syncId = cfg ? await syncStart(cfg, userId, provider.source) : 0;
     try {
-      const rows = await scrapeProvider(provider, userId, daysBack);
+      const { rows, balances } = await scrapeProvider(provider, userId, daysBack);
       allRows.push(...rows);
-      details.push(`${provider.source}: ${rows.length}`);
       if (cfg) {
-        await upsertConnection(cfg, userId, provider.source, "connected", new Date().toISOString(), null);
-        await syncUpdate(cfg, syncId, details.join(" | "));
+        const at = new Date().toISOString();
+        await upsertRows(cfg, rows);
+        await recordBalances(cfg, userId, provider.source, balances, at);
+        await upsertConnection(cfg, userId, provider.source, "connected", at, null);
+        await syncFinish(cfg, syncId, "done", rows.length, `${provider.source}: ${rows.length}`);
       }
     } catch (err: any) {
       const msg = `${provider.source}: ${err?.message ?? String(err)}`;
       console.error(`[scraper] FAILED ${msg}`);
       failures.push(msg);
-      details.push(`${provider.source}: FAILED`);
       if (cfg) {
         await upsertConnection(cfg, userId, provider.source, "error", null, err?.message ?? String(err));
-        await syncUpdate(cfg, syncId, details.join(" | "));
+        await syncFinish(cfg, syncId, "error", 0, err?.message ?? String(err));
       }
     }
   }
@@ -181,12 +204,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.error(`[scraper] upserting ${allRows.length} transactions to D1...`);
-  await upsertRows(cfg, allRows);
-  const ok = failures.length === 0;
-  await syncFinish(cfg, syncId, ok ? "done" : "error", allRows.length, details.join(" | "));
   console.error(`[scraper] done: ${allRows.length} transactions; ${failures.length} provider failure(s).`);
-  if (!ok) process.exit(1);
+  if (failures.length) process.exit(1);
 }
 
 main().catch((err) => {

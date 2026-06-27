@@ -36,14 +36,26 @@ CREATE TABLE IF NOT EXISTS connections (
   PRIMARY KEY (user_id, source)
 );
 
--- One row per sync (per user), with live progress detail for the dashboard.
+-- One row per (user, source) per scrape — gives per-account sync history.
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id     TEXT NOT NULL,
+  source      TEXT,                 -- which institution this sync covered
   status      TEXT NOT NULL,        -- running | done | error
-  detail      TEXT,                 -- e.g. "hapoalim: 28 | isracard: 86"
-  inserted    INTEGER,
+  detail      TEXT,
+  inserted    INTEGER,              -- transactions upserted in this sync
   started_at  TEXT NOT NULL,
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sync_user ON sync_runs(user_id, id DESC);
+
+-- Point-in-time account balance snapshots (a detail beyond transactions).
+CREATE TABLE IF NOT EXISTS balances (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  account     TEXT,
+  balance     REAL,
+  scraped_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bal ON balances(user_id, source, id DESC);
