@@ -139,26 +139,58 @@ function AccountsView({ status, onSync, syncing }: { status: Status | null; onSy
   );
 }
 
+type SortKey = "date" | "description" | "amount";
+
 function TransactionsView() {
   const [txns, setTxns] = useState<Txn[] | null>(null);
   const [q, setQ] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("date");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
   useEffect(() => { api<{ transactions: Txn[] }>("/app/api/transactions?limit=1000").then((d) => setTxns(d.transactions)).catch(() => {}); }, []);
   if (!txns) return <p className="text-muted-foreground">Loading transactions…</p>;
-  const filtered = txns.filter((t) => !q || (t.description || "").toLowerCase().includes(q.toLowerCase()) || t.source.includes(q.toLowerCase()));
+
+  const toggleSort = (k: SortKey) => {
+    if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir(k === "date" || k === "amount" ? "desc" : "asc"); }
+  };
+
+  const filtered = txns.filter(
+    (t) => !q || (t.description || "").toLowerCase().includes(q.toLowerCase()) || t.source.includes(q.toLowerCase())
+  );
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp = 0;
+    if (sortKey === "date") cmp = +new Date(a.date) - +new Date(b.date);
+    else if (sortKey === "amount") cmp = a.amount - b.amount;
+    else cmp = (a.description || "").localeCompare(b.description || "");
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const arrow = (k: SortKey) => (sortKey === k ? (sortDir === "asc" ? " ↑" : " ↓") : "");
+  const SortTH = ({ k, label, align }: { k: SortKey; label: string; align?: string }) => (
+    <TableHead className={align}>
+      <button onClick={() => toggleSort(k)} className="inline-flex items-center font-medium hover:text-foreground">
+        {label}{arrow(k)}
+      </button>
+    </TableHead>
+  );
+
   return (
     <div className="space-y-4">
       <Input placeholder="Search description or source…" value={q} onChange={(e) => setQ(e.target.value)} className="max-w-sm" />
-      <p className="text-sm text-muted-foreground">{filtered.length} transactions</p>
+      <p className="text-sm text-muted-foreground">{sorted.length} transactions</p>
       <Card>
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Date</TableHead><TableHead>Type</TableHead><TableHead>Source</TableHead>
-              <TableHead>Account</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Amount</TableHead>
+              <SortTH k="date" label="Date" />
+              <TableHead>Type</TableHead><TableHead>Source</TableHead><TableHead>Account</TableHead>
+              <SortTH k="description" label="Description" />
+              <SortTH k="amount" label="Amount" align="text-right" />
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.slice(0, 1000).map((t, i) => (
+            {sorted.slice(0, 1000).map((t, i) => (
               <TableRow key={i}>
                 <TableCell className="whitespace-nowrap text-muted-foreground">{fmtDate(t.date)}</TableCell>
                 <TableCell><Badge variant="outline">{t.account_type}</Badge></TableCell>
