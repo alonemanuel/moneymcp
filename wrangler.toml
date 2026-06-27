@@ -3,6 +3,10 @@ main = "worker/index.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Persistent, queryable logs in the Cloudflare dashboard (Workers > moneymcp > Logs)
+[observability]
+enabled = true
+
 # Cloudflare D1 (SQLite). database_id is filled in at provisioning time
 # (`wrangler d1 create moneymcp`). Local dev (`wrangler dev`) uses local state
 # and ignores the id.

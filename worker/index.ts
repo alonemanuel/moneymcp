@@ -187,17 +187,26 @@ async function getFinancialSummary(env: Env, userId: string, args: Args) {
   return { from, to, totals, spend_by_category: byCategory, by_source: bySource };
 }
 
-async function getScrapeStatus(env: Env) {
-  const last = await env.DB.prepare(
-    `SELECT started_at, finished_at, success, inserted, error
-       FROM scrape_runs ORDER BY id DESC LIMIT 1`
-  ).first();
-  const lastSuccess = await env.DB.prepare(
-    `SELECT finished_at FROM scrape_runs WHERE success = 1 ORDER BY id DESC LIMIT 1`
-  ).first<{ finished_at: string }>();
+async function getScrapeStatus(env: Env, userId: string) {
+  // Per-user freshness: derived from THIS user's own rows, so a user with no
+  // connected accounts correctly sees "no data" rather than another user's scrape.
+  const mine = await env.DB.prepare(
+    `SELECT COUNT(*) AS transaction_count,
+            MAX(scraped_at) AS last_updated,
+            COUNT(DISTINCT source) AS account_sources
+       FROM transactions WHERE user_id = ?1`
+  )
+    .bind(userId)
+    .first<{ transaction_count: number; last_updated: string | null; account_sources: number }>();
+  const count = mine?.transaction_count ?? 0;
   return {
-    last_run: last ?? null,
-    last_successful_scrape: lastSuccess?.finished_at ?? null,
+    transaction_count: count,
+    last_updated: mine?.last_updated ?? null,
+    account_sources: mine?.account_sources ?? 0,
+    note:
+      count === 0
+        ? "No transactions for this account yet — no financial sources are connected/scraped for this user."
+        : "Data is refreshed by the scheduled scraper.",
   };
 }
 
@@ -210,7 +219,7 @@ async function callTool(env: Env, userId: string, name: string, args: Args) {
     case "get_financial_summary":
       return getFinancialSummary(env, userId, args);
     case "get_scrape_status":
-      return getScrapeStatus(env);
+      return getScrapeStatus(env, userId);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
