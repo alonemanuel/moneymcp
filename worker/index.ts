@@ -1,17 +1,21 @@
 /**
- * moneymcp — remote MCP server (Cloudflare Worker, Streamable HTTP).
+ * moneymcp — remote MCP server (Cloudflare Worker).
  *
- * Exposes READ-ONLY tools over the transactions stored in D1. Querying never
- * touches the bank — the scraper (separate, GitHub Actions) fills D1.
- *
- * Transport: MCP Streamable HTTP. A single endpoint handles JSON-RPC requests
- * over POST and returns application/json responses (stateless — no sessions,
- * no Durable Objects). Auth: a bearer token (MCP_AUTH_TOKEN).
+ * Multi-user: protected by OAuth 2.1 (@cloudflare/workers-oauth-provider) with
+ * Google as the identity provider. Each request runs as the authenticated user
+ * (ctx.props.userId); all D1 queries are scoped to that user. MCP is served at
+ * /mcp (Streamable HTTP JSON-RPC); the bank is never touched here — the scraper
+ * (GitHub Actions) fills D1.
  */
+import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { WorkerEntrypoint } from "cloudflare:workers";
 
 export interface Env {
   DB: D1Database;
-  MCP_AUTH_TOKEN: string;
+  OAUTH_KV: KVNamespace;
+  OAUTH_PROVIDER: any; // injected by OAuthProvider; offers parseAuthRequest/completeAuthorization/etc.
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
 }
 
 const SERVER_INFO = { name: "moneymcp", version: "0.1.0" };
@@ -263,40 +267,26 @@ async function handleRpc(env: Env, userId: string, msg: any): Promise<object | n
   }
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: CORS });
-    }
+// ---------- MCP API handler (only reached with a valid OAuth token) ----------
 
-    // Health check / friendly GET. If the client is opening an SSE stream
-    // (Streamable HTTP server->client channel), we don't offer one — signal
-    // that with 405 per spec. Otherwise return a small health payload.
+/** The MCP endpoint. The OAuthProvider validates the token before this runs and
+ *  passes the grant's props (incl. userId) via ctx.props. */
+class McpApiHandler extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const env = this.env;
+    const props = ((this.ctx as unknown as { props?: { userId?: string } }).props) ?? {};
+    const userId = props.userId;
+
+    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (request.method === "GET") {
-      const accept = request.headers.get("Accept") ?? "";
-      if (accept.includes("text/event-stream")) {
-        return new Response("SSE stream not supported", { status: 405, headers: CORS });
-      }
-      return new Response(JSON.stringify({ ok: true, server: SERVER_INFO }), {
-        headers: { "Content-Type": "application/json", ...CORS },
-      });
+      return new Response("SSE stream not supported", { status: 405, headers: CORS });
     }
-
-    // Auth: Bearer token in the Authorization header, or a `key` query param
-    // (the Claude app connector UI can't set headers, so the token rides in
-    // the connector URL).
-    const auth = request.headers.get("Authorization") ?? "";
-    const url = new URL(request.url);
-    const token = auth.replace(/^Bearer\s+/i, "") || (url.searchParams.get("key") ?? "");
-    if (!env.MCP_AUTH_TOKEN || token !== env.MCP_AUTH_TOKEN) {
-      return new Response(JSON.stringify(rpcError(null, -32001, "Unauthorized")), {
+    if (!userId) {
+      return new Response(JSON.stringify(rpcError(null, -32001, "No user in token")), {
         status: 401,
         headers: { "Content-Type": "application/json", ...CORS },
       });
     }
-    // Resolve the user this request acts as. The legacy single-user token maps
-    // to 'alon'; OAuth (Phase B) will resolve the token to the authenticated user.
-    const userId = "alon";
 
     let body: any;
     try {
@@ -308,7 +298,6 @@ export default {
       });
     }
 
-    // Support JSON-RPC batches and single messages.
     if (Array.isArray(body)) {
       const responses = (await Promise.all(body.map((m) => handleRpc(env, userId, m)))).filter(
         (r) => r !== null
@@ -319,12 +308,122 @@ export default {
     }
 
     const response = await handleRpc(env, userId, body);
-    if (response === null) {
-      // Notification — 202 with no body.
-      return new Response(null, { status: 202, headers: CORS });
-    }
+    if (response === null) return new Response(null, { status: 202, headers: CORS });
     return new Response(JSON.stringify(response), {
       headers: { "Content-Type": "application/json", ...CORS },
     });
+  }
+}
+
+// ---------- OAuth login UI (delegates identity to Google) ----------
+
+function b64urlEncode(s: string): string {
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(s: string): string {
+  return atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+}
+/** Decode a JWT payload (we trust it: it came directly from Google's token endpoint over TLS). */
+function jwtPayload(jwt: string): any {
+  return JSON.parse(b64urlDecode(jwt.split(".")[1]));
+}
+
+/** Map a verified Google email to a stable moneymcp user id (creating one on first login). */
+async function resolveUser(env: Env, email: string): Promise<string> {
+  const existing = await env.DB.prepare(`SELECT id FROM users WHERE email = ?1`)
+    .bind(email)
+    .first<{ id: string }>();
+  if (existing) return existing.id;
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO users (id, email, created_at) VALUES (?1, ?2, datetime('now'))`
+  )
+    .bind(id, email)
+    .run();
+  return id;
+}
+
+const GOOGLE_CALLBACK_PATH = "/callback/google";
+
+const defaultHandler = {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Step 1: Claude sends the user here. Bounce to Google to sign in.
+    if (url.pathname === "/authorize") {
+      let authReq: any;
+      try {
+        authReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+      } catch {
+        return new Response("Invalid authorization request (unknown or unregistered client)", {
+          status: 400,
+        });
+      }
+      const g = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      g.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
+      g.searchParams.set("redirect_uri", url.origin + GOOGLE_CALLBACK_PATH);
+      g.searchParams.set("response_type", "code");
+      g.searchParams.set("scope", "openid email");
+      g.searchParams.set("prompt", "select_account");
+      g.searchParams.set("state", b64urlEncode(JSON.stringify(authReq)));
+      return Response.redirect(g.toString(), 302);
+    }
+
+    // Step 2: Google redirects back. Verify identity, then issue our auth code.
+    if (url.pathname === GOOGLE_CALLBACK_PATH) {
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      if (!code || !state) return new Response("Missing code/state", { status: 400 });
+      const authReq = JSON.parse(b64urlDecode(state));
+
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: env.GOOGLE_CLIENT_ID,
+          client_secret: env.GOOGLE_CLIENT_SECRET,
+          redirect_uri: url.origin + GOOGLE_CALLBACK_PATH,
+          grant_type: "authorization_code",
+        }),
+      });
+      const tokenJson = (await tokenRes.json()) as { id_token?: string; error?: string };
+      if (!tokenJson.id_token) {
+        return new Response(`Google token exchange failed: ${tokenJson.error ?? "unknown"}`, {
+          status: 502,
+        });
+      }
+      const claims = jwtPayload(tokenJson.id_token);
+      if (!claims.email || claims.email_verified === false) {
+        return new Response("Google email not verified", { status: 403 });
+      }
+
+      const userId = await resolveUser(env, claims.email);
+      const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+        request: authReq,
+        userId,
+        metadata: { email: claims.email },
+        scope: authReq.scope ?? ["read"],
+        props: { userId, email: claims.email },
+      });
+      return Response.redirect(redirectTo, 302);
+    }
+
+    if (url.pathname === "/") {
+      return new Response(JSON.stringify({ ok: true, server: SERVER_INFO }), {
+        headers: { "Content-Type": "application/json", ...CORS },
+      });
+    }
+    return new Response("Not found", { status: 404 });
   },
 };
+
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler: McpApiHandler as any,
+  defaultHandler: defaultHandler as any,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+  scopesSupported: ["read"],
+});

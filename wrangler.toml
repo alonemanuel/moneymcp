@@ -10,3 +10,8 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "moneymcp"
 database_id = "d6e10474-285a-4091-90ec-388b300922cf"
+
+# OAuth token/grant storage (@cloudflare/workers-oauth-provider)
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "b5a38203be884b4e903fc79a338d34c5"
