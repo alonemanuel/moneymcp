@@ -26,12 +26,24 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_tx_user_date ON transactions(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_tx_desc ON transactions(description);
 
--- One row per scrape attempt, for freshness / get_scrape_status.
-CREATE TABLE IF NOT EXISTS scrape_runs (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  started_at   TEXT NOT NULL,
-  finished_at  TEXT,
-  success      INTEGER,            -- 1 / 0
-  inserted     INTEGER,            -- new rows upserted
-  error        TEXT
+-- Connected institutions per user (drives the dashboard "connected" state).
+CREATE TABLE IF NOT EXISTS connections (
+  user_id      TEXT NOT NULL,
+  source       TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'connected',  -- connected | error
+  last_sync_at TEXT,
+  last_error   TEXT,
+  PRIMARY KEY (user_id, source)
 );
+
+-- One row per sync (per user), with live progress detail for the dashboard.
+CREATE TABLE IF NOT EXISTS sync_runs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     TEXT NOT NULL,
+  status      TEXT NOT NULL,        -- running | done | error
+  detail      TEXT,                 -- e.g. "hapoalim: 28 | isracard: 86"
+  inserted    INTEGER,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sync_user ON sync_runs(user_id, id DESC);

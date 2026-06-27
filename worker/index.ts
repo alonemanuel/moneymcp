@@ -70,7 +70,13 @@ const TOOLS = [
   {
     name: "get_scrape_status",
     description:
-      "Report when transactions were last refreshed from the bank (last successful scrape time) and whether the most recent run succeeded. Use this to judge data freshness.",
+      "Report this user's data freshness: transaction count, when it was last updated, and the latest sync run's live status (running/done/error with per-account detail). Use this to judge freshness or whether a refresh is in progress.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_connections",
+    description:
+      "List the financial institutions this user has connected (source, status: connected/error, last sync time). An empty list means no accounts are connected yet.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
@@ -199,15 +205,32 @@ async function getScrapeStatus(env: Env, userId: string) {
     .bind(userId)
     .first<{ transaction_count: number; last_updated: string | null; account_sources: number }>();
   const count = mine?.transaction_count ?? 0;
+  const lastSync = await env.DB.prepare(
+    `SELECT status, detail, inserted, started_at, finished_at
+       FROM sync_runs WHERE user_id = ?1 ORDER BY id DESC LIMIT 1`
+  )
+    .bind(userId)
+    .first();
   return {
     transaction_count: count,
     last_updated: mine?.last_updated ?? null,
     account_sources: mine?.account_sources ?? 0,
+    latest_sync: lastSync ?? null,
     note:
       count === 0
         ? "No transactions for this account yet — no financial sources are connected/scraped for this user."
         : "Data is refreshed by the scheduled scraper.",
   };
+}
+
+async function getConnections(env: Env, userId: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT source, status, last_sync_at, last_error FROM connections
+      WHERE user_id = ?1 ORDER BY source`
+  )
+    .bind(userId)
+    .all();
+  return { count: results.length, connections: results };
 }
 
 async function callTool(env: Env, userId: string, name: string, args: Args) {
@@ -220,6 +243,8 @@ async function callTool(env: Env, userId: string, name: string, args: Args) {
       return getFinancialSummary(env, userId, args);
     case "get_scrape_status":
       return getScrapeStatus(env, userId);
+    case "get_connections":
+      return getConnections(env, userId);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

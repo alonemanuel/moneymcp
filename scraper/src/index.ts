@@ -43,18 +43,52 @@ async function upsertRows(cfg: D1Config, rows: TxnRow[]): Promise<void> {
   }
 }
 
-async function recordRun(
+// --- per-user sync status (drives the dashboard's live progress) ---
+
+async function syncStart(cfg: D1Config, userId: string): Promise<number> {
+  const res = await d1Query(
+    cfg,
+    `INSERT INTO sync_runs (user_id, status, detail, started_at) VALUES (?,?,?,?)`,
+    [userId, "running", "starting", new Date().toISOString()]
+  );
+  return Number((res[0]?.meta as any)?.last_row_id ?? 0);
+}
+
+async function syncUpdate(cfg: D1Config, id: number, detail: string): Promise<void> {
+  await d1Query(cfg, `UPDATE sync_runs SET detail = ?1 WHERE id = ?2`, [detail, id]);
+}
+
+async function syncFinish(
   cfg: D1Config,
-  startedAt: string,
-  success: boolean,
+  id: number,
+  status: "done" | "error",
   inserted: number,
+  detail: string
+): Promise<void> {
+  await d1Query(
+    cfg,
+    `UPDATE sync_runs SET status=?1, inserted=?2, detail=?3, finished_at=?4 WHERE id=?5`,
+    [status, inserted, detail, new Date().toISOString(), id]
+  );
+}
+
+async function upsertConnection(
+  cfg: D1Config,
+  userId: string,
+  source: string,
+  status: string,
+  lastSyncAt: string | null,
   error: string | null
 ): Promise<void> {
   await d1Query(
     cfg,
-    `INSERT INTO scrape_runs (started_at, finished_at, success, inserted, error)
-     VALUES (?,?,?,?,?)`,
-    [startedAt, new Date().toISOString(), success ? 1 : 0, inserted, error]
+    `INSERT INTO connections (user_id, source, status, last_sync_at, last_error)
+     VALUES (?1,?2,?3,?4,?5)
+     ON CONFLICT(user_id, source) DO UPDATE SET
+       status = excluded.status,
+       last_sync_at = COALESCE(excluded.last_sync_at, connections.last_sync_at),
+       last_error = excluded.last_error`,
+    [userId, source, status, lastSyncAt, error]
   );
 }
 
@@ -111,18 +145,32 @@ async function main(): Promise<void> {
   }
   console.error(`[scraper] providers: ${providers.map((p) => p.source).join(", ")}`);
   const cfg = dryRun ? null : d1ConfigFromEnv();
-  const startedAt = new Date().toISOString();
+
+  // Open a sync_runs row so the dashboard can show live progress.
+  const syncId = cfg ? await syncStart(cfg, userId) : 0;
 
   // Scrape each provider independently so one failure doesn't lose the others.
   const allRows: TxnRow[] = [];
   const failures: string[] = [];
+  const details: string[] = [];
   for (const provider of providers) {
     try {
-      allRows.push(...(await scrapeProvider(provider, userId, daysBack)));
+      const rows = await scrapeProvider(provider, userId, daysBack);
+      allRows.push(...rows);
+      details.push(`${provider.source}: ${rows.length}`);
+      if (cfg) {
+        await upsertConnection(cfg, userId, provider.source, "connected", new Date().toISOString(), null);
+        await syncUpdate(cfg, syncId, details.join(" | "));
+      }
     } catch (err: any) {
       const msg = `${provider.source}: ${err?.message ?? String(err)}`;
       console.error(`[scraper] FAILED ${msg}`);
       failures.push(msg);
+      details.push(`${provider.source}: FAILED`);
+      if (cfg) {
+        await upsertConnection(cfg, userId, provider.source, "error", null, err?.message ?? String(err));
+        await syncUpdate(cfg, syncId, details.join(" | "));
+      }
     }
   }
 
@@ -136,7 +184,7 @@ async function main(): Promise<void> {
   console.error(`[scraper] upserting ${allRows.length} transactions to D1...`);
   await upsertRows(cfg, allRows);
   const ok = failures.length === 0;
-  await recordRun(cfg, startedAt, ok, allRows.length, ok ? null : failures.join(" | "));
+  await syncFinish(cfg, syncId, ok ? "done" : "error", allRows.length, details.join(" | "));
   console.error(`[scraper] done: ${allRows.length} transactions; ${failures.length} provider failure(s).`);
   if (!ok) process.exit(1);
 }
