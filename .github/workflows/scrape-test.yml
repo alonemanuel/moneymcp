@@ -1,0 +1,62 @@
+name: scrape-test
+
+# Empirical test: does Hapoalim re-challenge with an OTP when we scrape from
+# GitHub Actions' (changing, datacenter) IPs using the saved trusted profile?
+# Runs a headless dry-run (no D1 write) and prints PASS/FAIL.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 6,18 * * *" # twice daily (UTC)
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure Chromium for Puppeteer
+        run: npx puppeteer browsers install chrome
+
+      - name: Reassemble trusted profile from secrets
+        env:
+          P1: ${{ secrets.PROFILE_PART_1 }}
+          P2: ${{ secrets.PROFILE_PART_2 }}
+          P3: ${{ secrets.PROFILE_PART_3 }}
+          P4: ${{ secrets.PROFILE_PART_4 }}
+        run: |
+          printf '%s' "$P1$P2$P3$P4" | base64 -d > profile.tar.gz
+          tar xzf profile.tar.gz
+          echo "Profile restored:"
+          ls -la .hapoalim-profile/Default/Cookies
+
+      - name: Dry-run scrape (Hapoalim)
+        id: scrape
+        env:
+          HAPOALIM_USER_CODE: ${{ secrets.HAPOALIM_USER_CODE }}
+          HAPOALIM_PASSWORD: ${{ secrets.HAPOALIM_PASSWORD }}
+          BROWSER_PROFILE_DIR: ./.hapoalim-profile
+          DAYS_BACK: "30"
+        run: |
+          set +e
+          npx tsx scraper/src/index.ts --dry-run > out.json 2> err.log
+          echo "----- scraper stderr -----"
+          cat err.log
+          echo "--------------------------"
+          if grep -qiE "TIMEOUT|otp|INVALID_PASSWORD|new computer|כניסה חדשה" err.log; then
+            echo "## ❌ Hapoalim re-challenged (OTP / timeout) — trust did NOT survive the IP change" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          elif grep -qiE "hapoalim: [0-9]+ transactions" err.log; then
+            N=$(grep -oiE "hapoalim: [0-9]+ transactions" err.log | grep -oE "[0-9]+" | head -1)
+            echo "## ✅ PASS — scraped $N transactions from GitHub's IP with NO OTP" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ⚠️ Inconclusive — check logs" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
