@@ -11,6 +11,7 @@ Categories: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 ## [Unreleased]
 
 ### Added
+- **Multi-user via OAuth 2.1 (Google login), LIVE** (2026-06-27): MCP moved to `/mcp`, protected by `@cloudflare/workers-oauth-provider` (DCR + PKCE + discovery), identity delegated to Google. Verified email → `users` row (auto-provisioned on first login); every query scoped to `ctx.props.userId`. Per-user data isolation (`user_id` on transactions; existing data → `alon`). Supersedes the single-user `?key=` token. KV `OAUTH_KV` for tokens; Google client id/secret as Worker secrets.
 - **Automatic Hapoalim refresh, LIVE** (`.github/workflows/scrape.yml`): GitHub Actions scrapes twice daily and writes to D1 — free, no hardware, no OTP. Trusted profile stored as base64-split GitHub secrets; `--no-sandbox` for CI Chrome. Verified end-to-end (28 txns written from CI). Doubles as a trust canary. (2026-06-27)
 - **Multi-provider scraping** (`scraper/providers.ts`): Hapoalim + Isracard + Max, each enabled by its own env credentials, scraped into one D1 and tagged with a new `source` column. MCP tools now surface `source`, support a `source` filter, and the summary includes a by-source breakdown. (2026-06-26)
 - **Isracard loaded** (86 transactions): required a visible browser (`SHOW_BROWSER=1`) + `--disable-blink-features=AutomationControlled` + logged-in profile to beat Akamai bot-protection. Generalized `login.ts` to bootstrap any provider's trusted session. See [decisions.md](./decisions.md). (2026-06-26)

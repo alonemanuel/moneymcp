@@ -55,10 +55,11 @@ No service requires a credit card.
 
 | Item | Choice | Status |
 |------|--------|--------|
-| Transport | **Streamable HTTP** (SSE is being deprecated by Anthropic) | 🟡 |
-| Auth | Bearer token (later: OAuth) — only the user's Claude account can reach the endpoint | 🟡 |
+| Endpoint | **`https://moneymcp.alonemanuel95.workers.dev/mcp`** (Streamable HTTP JSON-RPC) | ✅ |
+| Auth | **OAuth 2.1 + PKCE** via `@cloudflare/workers-oauth-provider`, identity delegated to **Google**. DCR + `/authorize` + `/token` + discovery metadata. Each grant carries `userId`; every query scoped to it. | ✅ deployed |
+| Token storage | Cloudflare KV (`OAUTH_KV`) | ✅ |
 
-> ❌ stdio transport was the POC approach; rejected for the product because the iPhone Claude app cannot launch a local process. Anthropic's cloud connects to the server over HTTPS. See decisions.md.
+> ❌ stdio transport (POC) and the single-user `?key=` bearer token are both superseded. Multi-user uses OAuth; the Claude connector URL is `…/mcp` and users sign in with Google. See decisions.md.
 
 ## Tools exposed (read-only, served from D1)
 
