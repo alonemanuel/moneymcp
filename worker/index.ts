@@ -271,6 +271,26 @@ async function getConnections(env: Env, userId: string) {
   return { count: results.length, connections: results };
 }
 
+/** Per-account breakdown (each bank account / each card number) for the dashboard. */
+async function getAccounts(env: Env, userId: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT t.source, t.account,
+            CASE WHEN t.source IN ('isracard','max','visaCal','amex') THEN 'card' ELSE 'bank' END AS account_type,
+            COUNT(*) AS txn_count,
+            MAX(t.date) AS last_transaction,
+            (SELECT b.balance FROM balances b
+               WHERE b.user_id = t.user_id AND b.source = t.source AND b.account = t.account
+               ORDER BY b.id DESC LIMIT 1) AS balance
+       FROM transactions t
+      WHERE t.user_id = ?1
+      GROUP BY t.source, t.account
+      ORDER BY account_type, t.source, t.account`
+  )
+    .bind(userId)
+    .all();
+  return results;
+}
+
 async function getBalanceHistory(env: Env, userId: string, source?: string) {
   const { results } = await env.DB.prepare(
     `SELECT source, account, balance, scraped_at FROM balances
@@ -509,84 +529,6 @@ async function dispatchScrape(env: Env, userId: string): Promise<boolean> {
   return res.status === 204;
 }
 
-const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>moneymcp</title>
-<style>
-  body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#1a1d23;background:#fff}
-  h1{font-size:1.4rem;margin-bottom:.2rem}.muted{color:#6b7280;font-size:.85rem}
-  .acct{border:1px solid #e5e7eb;border-radius:10px;margin:.6rem 0;overflow:hidden}
-  .hdr{padding:.9rem 1rem;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
-  .hdr:hover{background:#f9fafb}
-  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:.5rem}
-  .ok{background:#22c55e}.err{background:#ef4444}.none{background:#9ca3af}
-  .bal{font-variant-numeric:tabular-nums;font-weight:600}
-  .detail{padding:0 1rem;border-top:1px solid #f0f0f0}
-  table{width:100%;border-collapse:collapse;font-size:.82rem;margin:.4rem 0}
-  th,td{text-align:left;padding:.35rem .3rem;border-bottom:1px solid #f3f4f6}
-  th{color:#6b7280;font-weight:500}
-  button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.6rem 1rem;font-size:1rem;cursor:pointer;margin-top:.5rem}
-  button:disabled{opacity:.5;cursor:default}
-  #status{margin-top:.8rem;font-size:.9rem;color:#374151;min-height:1.2em}
-  .sec{font-size:.8rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.03em;margin:1.1rem 0 .2rem}
-</style></head><body>
-<h1>moneymcp</h1>
-<div class="muted" id="who"></div>
-<div id="conns"></div>
-<button id="sync" onclick="doSync()">Sync now</button>
-<div id="status"></div>
-<script>
-var $=function(id){return document.getElementById(id);};
-var expanded={};
-function fmt(t){ if(!t) return '—'; var d=new Date(t); return isNaN(d)?t:d.toLocaleString(); }
-function money(n){ return (n==null)?'—':'₪'+Number(n).toLocaleString(undefined,{maximumFractionDigits:2}); }
-function esc(s){ return String(s).replace(/[<>&]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}); }
-async function load(){
-  var r=await fetch('/app/api/status'); if(!r.ok){ $('status').textContent='Session expired — reload the page.'; return; }
-  var d=await r.json();
-  $('who').textContent=d.email;
-  function card(c){
-    var cls=c.status==='connected'?'ok':(c.status==='error'?'err':'none');
-    var right = (c.account_type==='card')
-      ? '<span class="muted">last txn '+fmt(c.last_transaction)+'</span>'
-      : '<span class="bal">'+money(c.balance)+' <span class="muted">· '+fmt(c.last_transaction)+'</span></span>';
-    return '<div class="acct"><div class="hdr" onclick="toggle(\\''+c.source+'\\')">'
-      +'<span><span class="dot '+cls+'"></span><b>'+esc(c.source)+'</b></span>'+right
-      +'</div><div class="detail" id="d_'+c.source+'"></div></div>';
-  }
-  var conns=d.connections||[];
-  var banks=conns.filter(function(c){return c.account_type!=='card';});
-  var cards=conns.filter(function(c){return c.account_type==='card';});
-  var html='';
-  if(conns.length===0){
-    html='<div class="acct"><div class="hdr"><span><span class="dot none"></span>No accounts connected yet</span></div></div>';
-  } else {
-    if(banks.length){ html+='<div class="sec">Bank accounts</div>'+banks.map(card).join(''); }
-    if(cards.length){ html+='<div class="sec">Credit cards</div>'+cards.map(card).join(''); }
-  }
-  $('conns').innerHTML=html;
-  Object.keys(expanded).forEach(function(s){ if(expanded[s]) loadSyncs(s); });
-  var s=d.latest_sync, line='';
-  if(s){ line = s.status==='running' ? ('⏳ syncing '+(s.source||'')+'…') : (s.status==='done' ? '✓ synced' : '⚠️ '+(s.detail||s.status)); }
-  $('status').textContent=(line?line+' · ':'')+(d.transaction_count||0)+' transactions';
-  $('sync').disabled = !!(s && s.status==='running');
-}
-function toggle(src){ expanded[src]=!expanded[src]; if(expanded[src]) loadSyncs(src); else { var e=$('d_'+src); if(e) e.innerHTML=''; } }
-async function loadSyncs(src){
-  var el=$('d_'+src); if(!el) return; if(!el.innerHTML) el.innerHTML='<div class="muted">loading…</div>';
-  var r=await fetch('/app/api/syncs?source='+encodeURIComponent(src)); var a=await r.json();
-  if(!a.length){ el.innerHTML='<div class="muted" style="padding:.5rem 0">no syncs yet</div>'; return; }
-  var t='<table><tr><th>started</th><th>rows</th><th>status</th><th>duration</th></tr>';
-  a.forEach(function(x){
-    var dur=(x.started_at&&x.finished_at)?Math.max(0,Math.round((new Date(x.finished_at)-new Date(x.started_at))/1000))+'s':'—';
-    t+='<tr><td>'+fmt(x.started_at)+'</td><td>'+(x.inserted==null?'—':x.inserted)+'</td><td>'+esc(x.status)+'</td><td>'+dur+'</td></tr>';
-  });
-  el.innerHTML=t+'</table>';
-}
-async function doSync(){ $('sync').disabled=true; $('status').textContent='Queued… (a scrape takes ~1–2 min to start)'; await fetch('/app/sync',{method:'POST'}); poll(); }
-function poll(){ load(); setTimeout(poll,4000); }
-poll();
-</script></body></html>`;
 
 const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -649,7 +591,7 @@ const defaultHandler = {
         return new Response(null, {
           status: 302,
           headers: {
-            Location: "/app",
+            Location: "/",
             "Set-Cookie": `mm_session=${sid}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL}`,
           },
         });
@@ -666,20 +608,31 @@ const defaultHandler = {
       return Response.redirect(redirectTo, 302);
     }
 
-    // ----- web dashboard -----
-    if (url.pathname === "/app") {
-      const sess = await getSession(request, env);
-      if (!sess) return redirectToGoogleLogin(env, url.origin);
-      return new Response(DASHBOARD_HTML, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
+    // ----- web dashboard (the SPA is served as a static asset at /) -----
+    // Login entry point: the SPA sends the user here on a 401.
+    if (url.pathname === "/app/login") {
+      return redirectToGoogleLogin(env, url.origin);
     }
     if (url.pathname === "/app/api/status") {
       const sess = await getSession(request, env);
       if (!sess) return new Response("unauthorized", { status: 401 });
       const conns = await getConnections(env, sess.userId);
       const status = await getScrapeStatus(env, sess.userId);
-      return new Response(JSON.stringify({ email: sess.email, ...conns, ...status }), {
+      const accounts = await getAccounts(env, sess.userId);
+      return new Response(JSON.stringify({ email: sess.email, ...conns, accounts, ...status }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.pathname === "/app/api/transactions") {
+      const sess = await getSession(request, env);
+      if (!sess) return new Response("unauthorized", { status: 401 });
+      const data = await getTransactions(env, sess.userId, {
+        from: "1970-01-01",
+        to: "9999-12-31",
+        source: url.searchParams.get("source") ?? undefined,
+        limit: Number(url.searchParams.get("limit") ?? 500),
+      });
+      return new Response(JSON.stringify(data), {
         headers: { "Content-Type": "application/json" },
       });
     }

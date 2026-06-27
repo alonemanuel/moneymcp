@@ -10,7 +10,8 @@
     "build:scraper": "tsc",
     "typecheck": "tsc --noEmit",
     "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy",
+    "web:build": "npm --prefix web run build",
+    "worker:deploy": "npm --prefix web run build && wrangler deploy",
     "worker:typecheck": "tsc -p worker/tsconfig.json"
   },
   "engines": {

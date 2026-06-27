@@ -11,6 +11,7 @@ Categories: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 ## [Unreleased]
 
 ### Added
+- **React + shadcn/ui dashboard** (`web/`, 2026-06-27): real Vite + React + Tailwind + shadcn app (dark, sidebar nav) served from the Worker as static assets at `/`. **Accounts view** groups Bank accounts vs Credit cards, showing each account/card **number**, balance, last transaction, and per-account sync history. **Transactions view** is a searchable table of all transactions. API/OAuth/MCP paths are worker-first; the SPA handles 401 by redirecting to `/app/login`. Replaces the old inline-HTML dashboard.
 - **Balances + per-account history** (2026-06-27): scraper captures account balance snapshots (`balances` table); `get_balances` tool; dashboard shows balance + last-transaction per account and an expandable per-account sync history (rows/status/duration). Scrape cron reduced to once daily.
 - **Web dashboard** (`/app`, 2026-06-27): Google-login-gated page showing connected institutions, per-account status + last sync, transaction count, and a **"Sync now"** button that triggers the scrape via GitHub `workflow_dispatch` (Worker → GitHub API). Live progress polled from `sync_runs`. Session via signed cookie + KV; reuses the existing Google client.
 - **Sync engine**: `connections` (per-user linked institutions) + `sync_runs` (live progress) tables; scraper writes live per-account progress and finalizes done/error; new `get_connections` tool and `latest_sync` in `get_scrape_status`.
