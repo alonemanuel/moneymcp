@@ -4,13 +4,16 @@ import { createHash } from "node:crypto";
 export interface ScrapedTxn {
   identifier?: string | number;
   date: string;
+  processedDate?: string;
   description: string;
   memo?: string;
   chargedAmount: number;
+  originalAmount?: number;
   originalCurrency?: string;
   status?: string;
   type?: string;
   category?: string;
+  installments?: { number?: number; total?: number };
 }
 
 /** A row as stored in D1 (matches worker/schema.sql `transactions`). */
@@ -20,10 +23,15 @@ export interface TxnRow {
   source: string;
   account: string;
   date: string;
+  processed_date: string | null;
   description: string;
   memo: string | null;
   amount: number;
+  original_amount: number | null;
   currency: string | null;
+  identifier: string | null;
+  installment_num: number | null;
+  installment_total: number | null;
   status: string | null;
   type: string | null;
   category: string | null;
@@ -56,10 +64,15 @@ export function txnToRow(
     source,
     account,
     date: txn.date,
+    processed_date: txn.processedDate ?? null,
     description: txn.description,
     memo: txn.memo ?? null,
     amount: txn.chargedAmount,
+    original_amount: txn.originalAmount ?? null,
     currency: txn.originalCurrency ?? null,
+    identifier: txn.identifier != null ? String(txn.identifier) : null,
+    installment_num: txn.installments?.number ?? null,
+    installment_total: txn.installments?.total ?? null,
     status: txn.status ?? null,
     type: txn.type ?? null,
     category: txn.category ?? null,

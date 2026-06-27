@@ -8,19 +8,24 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
-  hash         TEXT PRIMARY KEY,   -- dedupe key: account|date|amount|identifier
-  user_id      TEXT,               -- owner (FK -> users.id)
-  source       TEXT,               -- institution: hapoalim | isracard | max | ...
-  account      TEXT,               -- account number / id
-  date         TEXT NOT NULL,      -- ISO date (yyyy-mm-dd or full ISO)
-  description  TEXT,
-  memo         TEXT,
-  amount       REAL NOT NULL,      -- chargedAmount; negative = debit/outflow
-  currency     TEXT,
-  status       TEXT,               -- completed | pending
-  type         TEXT,               -- normal | installments | ...
-  category     TEXT,
-  scraped_at   TEXT NOT NULL       -- when this row was last written
+  hash             TEXT PRIMARY KEY,   -- dedupe key: account|date|amount|identifier
+  user_id          TEXT,               -- owner (FK -> users.id)
+  source           TEXT,               -- institution: hapoalim | isracard | max | ...
+  account          TEXT,               -- account number / card
+  date             TEXT NOT NULL,      -- transaction date (ISO)
+  processed_date   TEXT,               -- when it posted/settled
+  description      TEXT,
+  memo             TEXT,
+  amount           REAL NOT NULL,      -- chargedAmount; negative = debit/outflow
+  original_amount  REAL,               -- pre-FX amount (foreign txns)
+  currency         TEXT,               -- original currency
+  identifier       TEXT,               -- bank's own transaction id
+  installment_num  INTEGER,            -- this installment #
+  installment_total INTEGER,           -- total installments
+  status           TEXT,               -- completed | pending
+  type             TEXT,               -- normal | installments | ...
+  category         TEXT,
+  scraped_at       TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tx_user_date ON transactions(user_id, date);
@@ -30,6 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_tx_desc ON transactions(description);
 CREATE TABLE IF NOT EXISTS connections (
   user_id      TEXT NOT NULL,
   source       TEXT NOT NULL,
+  account_type TEXT,                                -- bank | card
   status       TEXT NOT NULL DEFAULT 'connected',  -- connected | error
   last_sync_at TEXT,
   last_error   TEXT,

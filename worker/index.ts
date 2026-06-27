@@ -83,8 +83,19 @@ const TOOLS = [
   {
     name: "get_balances",
     description:
-      "Current account balances (latest snapshot per account), captured at each sync. Use for 'how much do I have' / net worth questions.",
+      "Current account balances (latest snapshot per account), captured at each sync. Bank accounts have balances; credit cards generally don't. Use for 'how much do I have' / net worth questions.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_balance_history",
+    description:
+      "Balance snapshots over time (newest first) — to see how a bank account balance changed across syncs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Limit to one institution (e.g. hapoalim). Omit for all." },
+      },
+    },
   },
 ];
 
@@ -106,7 +117,10 @@ async function getTransactions(env: Env, userId: string, args: Args) {
   const limit = Math.min(Number(args.limit) || 200, 1000);
   const source = args.source as string | undefined;
   const { results } = await env.DB.prepare(
-    `SELECT source, account, date, description, memo, amount, currency, status, type, category
+    `SELECT source,
+            CASE WHEN source IN ('isracard','max','visaCal','amex') THEN 'card' ELSE 'bank' END AS account_type,
+            account, date, processed_date, description, memo, amount, original_amount,
+            currency, installment_num, installment_total, status, type, category
        FROM transactions
       WHERE user_id = ?1 AND date >= ?2 AND date <= ?3 AND (?4 IS NULL OR source = ?4)
       ORDER BY date DESC
@@ -197,7 +211,18 @@ async function getFinancialSummary(env: Env, userId: string, args: Args) {
   )
     .bind(userId, from, to)
     .all();
-  return { from, to, totals, spend_by_category: byCategory, by_source: bySource };
+  const { results: byType } = await env.DB.prepare(
+    `SELECT CASE WHEN source IN ('isracard','max','visaCal','amex') THEN 'card' ELSE 'bank' END AS account_type,
+            ROUND(SUM(CASE WHEN amount > 0 THEN amount END), 2) AS total_in,
+            ROUND(SUM(CASE WHEN amount < 0 THEN amount END), 2) AS total_out,
+            COUNT(*) AS count
+       FROM transactions
+      WHERE user_id = ?1 AND date >= ?2 AND date <= ?3
+      GROUP BY account_type`
+  )
+    .bind(userId, from, to)
+    .all();
+  return { from, to, totals, by_type: byType, by_source: bySource, spend_by_category: byCategory };
 }
 
 async function getScrapeStatus(env: Env, userId: string) {
@@ -232,18 +257,29 @@ async function getScrapeStatus(env: Env, userId: string) {
 
 async function getConnections(env: Env, userId: string) {
   const { results } = await env.DB.prepare(
-    `SELECT c.source, c.status, c.last_sync_at, c.last_error,
+    `SELECT c.source, c.account_type, c.status, c.last_sync_at, c.last_error,
             (SELECT MAX(t.date) FROM transactions t
                WHERE t.user_id = c.user_id AND t.source = c.source) AS last_transaction,
             (SELECT b.balance FROM balances b
                WHERE b.user_id = c.user_id AND b.source = c.source
                ORDER BY b.id DESC LIMIT 1) AS balance
        FROM connections c
-      WHERE c.user_id = ?1 ORDER BY c.source`
+      WHERE c.user_id = ?1 ORDER BY c.account_type, c.source`
   )
     .bind(userId)
     .all();
   return { count: results.length, connections: results };
+}
+
+async function getBalanceHistory(env: Env, userId: string, source?: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT source, account, balance, scraped_at FROM balances
+      WHERE user_id = ?1 AND (?2 IS NULL OR source = ?2)
+      ORDER BY id DESC LIMIT 200`
+  )
+    .bind(userId, source ?? null)
+    .all();
+  return { count: results.length, history: results };
 }
 
 async function getBalances(env: Env, userId: string) {
@@ -284,6 +320,8 @@ async function callTool(env: Env, userId: string, name: string, args: Args) {
       return getConnections(env, userId);
     case "get_balances":
       return getBalances(env, userId);
+    case "get_balance_history":
+      return getBalanceHistory(env, userId, args.source as string | undefined);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -490,6 +528,7 @@ const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8">
   button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.6rem 1rem;font-size:1rem;cursor:pointer;margin-top:.5rem}
   button:disabled{opacity:.5;cursor:default}
   #status{margin-top:.8rem;font-size:.9rem;color:#374151;min-height:1.2em}
+  .sec{font-size:.8rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.03em;margin:1.1rem 0 .2rem}
 </style></head><body>
 <h1>moneymcp</h1>
 <div class="muted" id="who"></div>
@@ -506,17 +545,24 @@ async function load(){
   var r=await fetch('/app/api/status'); if(!r.ok){ $('status').textContent='Session expired — reload the page.'; return; }
   var d=await r.json();
   $('who').textContent=d.email;
+  function card(c){
+    var cls=c.status==='connected'?'ok':(c.status==='error'?'err':'none');
+    var right = (c.account_type==='card')
+      ? '<span class="muted">last txn '+fmt(c.last_transaction)+'</span>'
+      : '<span class="bal">'+money(c.balance)+' <span class="muted">· '+fmt(c.last_transaction)+'</span></span>';
+    return '<div class="acct"><div class="hdr" onclick="toggle(\\''+c.source+'\\')">'
+      +'<span><span class="dot '+cls+'"></span><b>'+esc(c.source)+'</b></span>'+right
+      +'</div><div class="detail" id="d_'+c.source+'"></div></div>';
+  }
+  var conns=d.connections||[];
+  var banks=conns.filter(function(c){return c.account_type!=='card';});
+  var cards=conns.filter(function(c){return c.account_type==='card';});
   var html='';
-  if(!d.connections||d.connections.length===0){
+  if(conns.length===0){
     html='<div class="acct"><div class="hdr"><span><span class="dot none"></span>No accounts connected yet</span></div></div>';
   } else {
-    d.connections.forEach(function(c){
-      var cls=c.status==='connected'?'ok':(c.status==='error'?'err':'none');
-      html+='<div class="acct"><div class="hdr" onclick="toggle(\\''+c.source+'\\')">'
-        +'<span><span class="dot '+cls+'"></span><b>'+esc(c.source)+'</b></span>'
-        +'<span class="bal">'+money(c.balance)+' <span class="muted">· last txn '+fmt(c.last_transaction)+'</span></span>'
-        +'</div><div class="detail" id="d_'+c.source+'"></div></div>';
-    });
+    if(banks.length){ html+='<div class="sec">Bank accounts</div>'+banks.map(card).join(''); }
+    if(cards.length){ html+='<div class="sec">Credit cards</div>'+cards.map(card).join(''); }
   }
   $('conns').innerHTML=html;
   Object.keys(expanded).forEach(function(s){ if(expanded[s]) loadSyncs(s); });

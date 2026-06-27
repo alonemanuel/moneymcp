@@ -9,6 +9,7 @@ import { CompanyTypes } from "israeli-bank-scrapers";
  */
 export interface Provider {
   source: string;
+  accountType: "bank" | "card";
   companyId: CompanyTypes;
   credentials: Record<string, string>;
   profileDir: string;
@@ -30,6 +31,7 @@ export function providersFromEnv(): Provider[] {
   if (has("HAPOALIM_USER_CODE", "HAPOALIM_PASSWORD")) {
     providers.push({
       source: "hapoalim",
+      accountType: "bank",
       companyId: CompanyTypes.hapoalim,
       credentials: {
         userCode: process.env.HAPOALIM_USER_CODE!,
@@ -43,6 +45,7 @@ export function providersFromEnv(): Provider[] {
   if (has("ISRACARD_ID", "ISRACARD_CARD6", "ISRACARD_PASSWORD")) {
     providers.push({
       source: "isracard",
+      accountType: "card",
       companyId: CompanyTypes.isracard,
       credentials: {
         id: process.env.ISRACARD_ID!,
@@ -56,6 +59,7 @@ export function providersFromEnv(): Provider[] {
   if (has("MAX_USERNAME", "MAX_PASSWORD")) {
     providers.push({
       source: "max",
+      accountType: "card",
       companyId: CompanyTypes.max,
       credentials: {
         username: process.env.MAX_USERNAME!,

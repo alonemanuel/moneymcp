@@ -24,11 +24,18 @@ function startDate(daysBack: number): Date {
 
 const UPSERT_SQL = `
 INSERT INTO transactions
-  (hash, user_id, source, account, date, description, memo, amount, currency, status, type, category, scraped_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  (hash, user_id, source, account, date, processed_date, description, memo,
+   amount, original_amount, currency, identifier, installment_num, installment_total,
+   status, type, category, scraped_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(hash) DO UPDATE SET
   user_id = excluded.user_id,
   source = excluded.source,
+  processed_date = excluded.processed_date,
+  original_amount = excluded.original_amount,
+  identifier = excluded.identifier,
+  installment_num = excluded.installment_num,
+  installment_total = excluded.installment_total,
   status = excluded.status,
   memo = excluded.memo,
   category = excluded.category,
@@ -37,8 +44,9 @@ ON CONFLICT(hash) DO UPDATE SET
 async function upsertRows(cfg: D1Config, rows: TxnRow[]): Promise<void> {
   for (const r of rows) {
     await d1Query(cfg, UPSERT_SQL, [
-      r.hash, r.user_id, r.source, r.account, r.date, r.description, r.memo,
-      r.amount, r.currency, r.status, r.type, r.category, r.scraped_at,
+      r.hash, r.user_id, r.source, r.account, r.date, r.processed_date, r.description, r.memo,
+      r.amount, r.original_amount, r.currency, r.identifier, r.installment_num, r.installment_total,
+      r.status, r.type, r.category, r.scraped_at,
     ]);
   }
 }
@@ -90,19 +98,21 @@ async function upsertConnection(
   cfg: D1Config,
   userId: string,
   source: string,
+  accountType: string,
   status: string,
   lastSyncAt: string | null,
   error: string | null
 ): Promise<void> {
   await d1Query(
     cfg,
-    `INSERT INTO connections (user_id, source, status, last_sync_at, last_error)
-     VALUES (?1,?2,?3,?4,?5)
+    `INSERT INTO connections (user_id, source, account_type, status, last_sync_at, last_error)
+     VALUES (?1,?2,?3,?4,?5,?6)
      ON CONFLICT(user_id, source) DO UPDATE SET
+       account_type = excluded.account_type,
        status = excluded.status,
        last_sync_at = COALESCE(excluded.last_sync_at, connections.last_sync_at),
        last_error = excluded.last_error`,
-    [userId, source, status, lastSyncAt, error]
+    [userId, source, accountType, status, lastSyncAt, error]
   );
 }
 
@@ -183,7 +193,7 @@ async function main(): Promise<void> {
         const at = new Date().toISOString();
         await upsertRows(cfg, rows);
         await recordBalances(cfg, userId, provider.source, balances, at);
-        await upsertConnection(cfg, userId, provider.source, "connected", at, null);
+        await upsertConnection(cfg, userId, provider.source, provider.accountType, "connected", at, null);
         await syncFinish(cfg, syncId, "done", rows.length, `${provider.source}: ${rows.length}`);
       }
     } catch (err: any) {
@@ -191,7 +201,7 @@ async function main(): Promise<void> {
       console.error(`[scraper] FAILED ${msg}`);
       failures.push(msg);
       if (cfg) {
-        await upsertConnection(cfg, userId, provider.source, "error", null, err?.message ?? String(err));
+        await upsertConnection(cfg, userId, provider.source, provider.accountType, "error", null, err?.message ?? String(err));
         await syncFinish(cfg, syncId, "error", 0, err?.message ?? String(err));
       }
     }
