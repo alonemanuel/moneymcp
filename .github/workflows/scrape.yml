@@ -7,6 +7,11 @@ name: scrape
 
 on:
   workflow_dispatch:
+    inputs:
+      user_id:
+        description: "User to scrape (defaults to alon)"
+        required: false
+        default: "alon"
   schedule:
     - cron: "5 6,18 * * *" # twice daily (UTC)
 
@@ -47,4 +52,5 @@ jobs:
           BROWSER_PROFILE_DIR: ./.hapoalim-profile
           DAYS_BACK: "30"
           NO_SANDBOX: "1"
+          USER_ID: ${{ github.event.inputs.user_id || 'alon' }}
         run: npx tsx scraper/src/index.ts
