@@ -6,6 +6,23 @@ When you make a non-trivial decision (architecture, dependency, data model, secu
 
 ---
 
+## 2026-06-27 — VERIFIED: Hapoalim device-trust survives GitHub Actions (free auto-scrape works)
+
+**Finding:** A headless scrape from a GitHub Actions runner (datacenter IP, different from the Mac that established the session), using the trusted profile restored from GitHub secrets, **scraped 28 Hapoalim transactions with no OTP**. Run twice and consistent.
+
+**Why it matters:** This overturns the earlier worry that ephemeral CI IPs would re-trigger Hapoalim's new-device SMS. Trust is **cookie/profile-based, not IP-bound** — so the **free** path (GitHub Actions cron + profile in secrets) is viable: free + automatic + no hardware + no credit card. The Oracle/VPS fallback is not needed for Hapoalim.
+
+**Mechanics that made it work:**
+- Trusted profile (130KB, caches excluded) base64-split across 4 GitHub secrets, reassembled in the workflow.
+- `--no-sandbox` required for Chrome on GitHub's Ubuntu runners (`NO_SANDBOX=1`).
+
+**Open caveats:**
+- Trust longevity unknown — banks expire device trust eventually. The scheduled run doubles as a **canary**; if it starts re-OTPing, trust lapsed and we re-bootstrap.
+- Profile is currently **read-only** from secrets (not written back). If Hapoalim rotates the trust cookie, a writable store (R2 / commit-back) may be needed to keep it fresh. Revisit if the canary fails.
+- **Isracard still needs a visible browser** (Akamai) → won't run headless in CI as-is; needs a different approach (e.g. xvfb on a VM) or stays manual.
+
+---
+
 ## 2026-06-26 — Multi-provider scraping; Isracard requires a visible browser
 
 **Decision:** The scraper supports multiple institutions (Hapoalim bank + Isracard & Max cards), each enabled by its own env credentials and scraped into the same D1, tagged with a `source` column. **Isracard must be scraped with a visible browser** (`SHOW_BROWSER=1`) plus `--disable-blink-features=AutomationControlled` and a logged-in profile.
