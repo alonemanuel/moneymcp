@@ -44,6 +44,7 @@ jobs:
           HAPOALIM_PASSWORD: ${{ secrets.HAPOALIM_PASSWORD }}
           BROWSER_PROFILE_DIR: ./.hapoalim-profile
           DAYS_BACK: "30"
+          NO_SANDBOX: "1"
         run: |
           set +e
           npx tsx scraper/src/index.ts --dry-run > out.json 2> err.log

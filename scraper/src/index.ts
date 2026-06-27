@@ -60,6 +60,15 @@ async function recordRun(
 /** Scrape one provider into rows. Throws on failure. */
 async function scrapeProvider(provider: Provider, daysBack: number): Promise<TxnRow[]> {
   console.error(`[scraper] ${provider.source}: scraping ${daysBack} days back...`);
+  const args = [
+    `--user-data-dir=${provider.profileDir}`,
+    "--disable-blink-features=AutomationControlled",
+  ];
+  // CI/Linux runners (e.g. GitHub Actions) have no Chrome sandbox available.
+  if (process.env.NO_SANDBOX === "1") {
+    args.push("--no-sandbox", "--disable-setuid-sandbox");
+  }
+
   const scraper = createScraper({
     companyId: provider.companyId,
     startDate: startDate(daysBack),
@@ -69,10 +78,7 @@ async function scrapeProvider(provider: Provider, daysBack: number): Promise<Txn
     // hides navigator.webdriver — together they get past the bot check.
     showBrowser: process.env.SHOW_BROWSER === "1",
     timeout: 120000,
-    args: [
-      `--user-data-dir=${provider.profileDir}`,
-      "--disable-blink-features=AutomationControlled",
-    ],
+    args,
   });
 
   // Credentials are validated per-provider in providers.ts; the library's
