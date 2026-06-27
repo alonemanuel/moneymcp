@@ -16,6 +16,7 @@ export interface Env {
   OAUTH_PROVIDER: any; // injected by OAuthProvider; offers parseAuthRequest/completeAuthorization/etc.
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
+  GITHUB_TOKEN: string;
 }
 
 const SERVER_INFO = { name: "moneymcp", version: "0.1.0" };
@@ -379,6 +380,113 @@ async function resolveUser(env: Env, email: string): Promise<string> {
 
 const GOOGLE_CALLBACK_PATH = "/callback/google";
 
+// ---------- web dashboard: session (cookie + KV) + GitHub dispatch ----------
+
+const SESSION_TTL = 60 * 60 * 24 * 7; // 7 days
+
+function getCookie(request: Request, name: string): string | null {
+  const c = request.headers.get("Cookie") ?? "";
+  const m = c.match(new RegExp(`(?:^|; )${name}=([^;]+)`));
+  return m ? m[1] : null;
+}
+async function getSession(
+  request: Request,
+  env: Env
+): Promise<{ userId: string; email: string } | null> {
+  const sid = getCookie(request, "mm_session");
+  if (!sid) return null;
+  const raw = await env.OAUTH_KV.get(`sess:${sid}`);
+  return raw ? JSON.parse(raw) : null;
+}
+async function createSession(env: Env, userId: string, email: string): Promise<string> {
+  const sid = crypto.randomUUID();
+  await env.OAUTH_KV.put(`sess:${sid}`, JSON.stringify({ userId, email }), {
+    expirationTtl: SESSION_TTL,
+  });
+  return sid;
+}
+function redirectToGoogleLogin(env: Env, origin: string): Response {
+  const g = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  g.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
+  g.searchParams.set("redirect_uri", origin + GOOGLE_CALLBACK_PATH);
+  g.searchParams.set("response_type", "code");
+  g.searchParams.set("scope", "openid email");
+  g.searchParams.set("prompt", "select_account");
+  g.searchParams.set("state", b64urlEncode(JSON.stringify({ w: 1 }))); // web-login marker
+  return Response.redirect(g.toString(), 302);
+}
+/** Trigger the per-user scrape via GitHub Actions workflow_dispatch. */
+async function dispatchScrape(env: Env, userId: string): Promise<boolean> {
+  const res = await fetch(
+    "https://api.github.com/repos/alonemanuel/moneymcp/actions/workflows/scrape.yml/dispatches",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "moneymcp-worker",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ref: "main", inputs: { user_id: userId } }),
+    }
+  );
+  return res.status === 204;
+}
+
+const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>moneymcp</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#1a1d23;background:#fff}
+  h1{font-size:1.4rem}.muted{color:#6b7280;font-size:.85rem}
+  .card{border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin:.6rem 0;display:flex;justify-content:space-between;align-items:center}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:.4rem}
+  .ok{background:#22c55e}.err{background:#ef4444}.none{background:#9ca3af}
+  button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.6rem 1rem;font-size:1rem;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  #status{margin-top:.8rem;font-size:.9rem;color:#374151;min-height:1.2em}
+  code{background:#f3f4f6;padding:.1rem .3rem;border-radius:4px}
+</style></head><body>
+<h1>moneymcp</h1>
+<div class="muted" id="who"></div>
+<div id="conns"></div>
+<p><button id="sync" onclick="sync()">Sync now</button></p>
+<div id="status"></div>
+<script>
+function fmt(t){ if(!t) return 'never'; var d=new Date(t); return isNaN(d)?t:d.toLocaleString(); }
+async function load(){
+  var r = await fetch('/app/api/status'); if(!r.ok){ document.getElementById('status').textContent='Session expired — reload.'; return; }
+  var d = await r.json();
+  document.getElementById('who').textContent = d.email;
+  var html = '';
+  if(!d.connections || d.connections.length===0){
+    html = '<div class="card"><span><span class="dot none"></span>No accounts connected yet</span></div>';
+  } else {
+    d.connections.forEach(function(c){
+      var cls = c.status==='connected'?'ok':(c.status==='error'?'err':'none');
+      html += '<div class="card"><span><span class="dot '+cls+'"></span><b>'+c.source+'</b> — '+c.status+'</span>'
+            + '<span class="muted">last sync '+fmt(c.last_sync_at)+'</span></div>';
+    });
+  }
+  document.getElementById('conns').innerHTML = html;
+  var s = d.latest_sync;
+  if(s){
+    var line = s.status==='running' ? '⏳ syncing… '+(s.detail||'') : (s.status==='done' ? '✓ last sync: '+(s.detail||'')+' ('+fmt(s.finished_at)+')' : '⚠️ '+(s.detail||s.status));
+    document.getElementById('status').textContent = line;
+    document.getElementById('sync').disabled = (s.status==='running');
+  }
+  document.getElementById('status').textContent += ' · '+(d.transaction_count||0)+' transactions';
+}
+async function sync(){
+  document.getElementById('sync').disabled = true;
+  document.getElementById('status').textContent = 'Queued… (a scrape takes ~1–2 min to start)';
+  await fetch('/app/sync', {method:'POST'});
+  poll();
+}
+function poll(){ load(); setTimeout(poll, 4000); }
+poll();
+</script></body></html>`;
+
 const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -408,7 +516,7 @@ const defaultHandler = {
       const code = url.searchParams.get("code");
       const state = url.searchParams.get("state");
       if (!code || !state) return new Response("Missing code/state", { status: 400 });
-      const authReq = JSON.parse(b64urlDecode(state));
+      const decoded = JSON.parse(b64urlDecode(state));
 
       const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
         method: "POST",
@@ -433,14 +541,55 @@ const defaultHandler = {
       }
 
       const userId = await resolveUser(env, claims.email);
+
+      // Web-dashboard login (state marker {w:1}) → set a session cookie.
+      if (decoded.w === 1) {
+        const sid = await createSession(env, userId, claims.email);
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: "/app",
+            "Set-Cookie": `mm_session=${sid}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL}`,
+          },
+        });
+      }
+
+      // Otherwise it's the MCP OAuth flow (decoded is the AuthRequest).
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-        request: authReq,
+        request: decoded,
         userId,
         metadata: { email: claims.email },
-        scope: authReq.scope ?? ["read"],
+        scope: decoded.scope ?? ["read"],
         props: { userId, email: claims.email },
       });
       return Response.redirect(redirectTo, 302);
+    }
+
+    // ----- web dashboard -----
+    if (url.pathname === "/app") {
+      const sess = await getSession(request, env);
+      if (!sess) return redirectToGoogleLogin(env, url.origin);
+      return new Response(DASHBOARD_HTML, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/app/api/status") {
+      const sess = await getSession(request, env);
+      if (!sess) return new Response("unauthorized", { status: 401 });
+      const conns = await getConnections(env, sess.userId);
+      const status = await getScrapeStatus(env, sess.userId);
+      return new Response(JSON.stringify({ email: sess.email, ...conns, ...status }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.pathname === "/app/sync" && request.method === "POST") {
+      const sess = await getSession(request, env);
+      if (!sess) return new Response("unauthorized", { status: 401 });
+      const ok = await dispatchScrape(env, sess.userId);
+      return new Response(JSON.stringify({ dispatched: ok }), {
+        status: ok ? 202 : 502,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (url.pathname === "/") {
