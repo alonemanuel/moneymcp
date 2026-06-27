@@ -1,0 +1,50 @@
+name: scrape
+
+# Scheduled auto-refresh: scrape Hapoalim from the trusted profile and write
+# transactions into Cloudflare D1. Runs twice daily (and on demand).
+# Also serves as a canary: if Hapoalim re-challenges (OTP), this fails and
+# tells us the device trust lapsed.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 6,18 * * *" # twice daily (UTC)
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure Chromium for Puppeteer
+        run: npx puppeteer browsers install chrome
+
+      - name: Reassemble trusted profile from secrets
+        env:
+          P1: ${{ secrets.PROFILE_PART_1 }}
+          P2: ${{ secrets.PROFILE_PART_2 }}
+          P3: ${{ secrets.PROFILE_PART_3 }}
+          P4: ${{ secrets.PROFILE_PART_4 }}
+        run: |
+          printf '%s' "$P1$P2$P3$P4" | base64 -d > profile.tar.gz
+          tar xzf profile.tar.gz
+          ls -la .hapoalim-profile/Default/Cookies
+
+      - name: Scrape -> D1
+        env:
+          HAPOALIM_USER_CODE: ${{ secrets.HAPOALIM_USER_CODE }}
+          HAPOALIM_PASSWORD: ${{ secrets.HAPOALIM_PASSWORD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          BROWSER_PROFILE_DIR: ./.hapoalim-profile
+          DAYS_BACK: "30"
+          NO_SANDBOX: "1"
+        run: npx tsx scraper/src/index.ts
