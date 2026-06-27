@@ -83,7 +83,7 @@ function today(): string {
 
 type Args = Record<string, unknown>;
 
-async function getTransactions(env: Env, args: Args) {
+async function getTransactions(env: Env, userId: string, args: Args) {
   const from = (args.from as string) ?? firstOfThisMonth();
   const to = (args.to as string) ?? today();
   const limit = Math.min(Number(args.limit) || 200, 1000);
@@ -91,19 +91,19 @@ async function getTransactions(env: Env, args: Args) {
   const { results } = await env.DB.prepare(
     `SELECT source, account, date, description, memo, amount, currency, status, type, category
        FROM transactions
-      WHERE date >= ?1 AND date <= ?2 AND (?3 IS NULL OR source = ?3)
+      WHERE user_id = ?1 AND date >= ?2 AND date <= ?3 AND (?4 IS NULL OR source = ?4)
       ORDER BY date DESC
-      LIMIT ?4`
+      LIMIT ?5`
   )
-    .bind(from, to, source ?? null, limit)
+    .bind(userId, from, to, source ?? null, limit)
     .all();
   return { from, to, source: source ?? "all", count: results.length, transactions: results };
 }
 
-async function searchTransactions(env: Env, args: Args) {
-  const conds: string[] = [];
-  const binds: unknown[] = [];
-  let i = 1;
+async function searchTransactions(env: Env, userId: string, args: Args) {
+  const conds: string[] = [`user_id = ?1`];
+  const binds: unknown[] = [userId];
+  let i = 2;
   if (args.query) {
     conds.push(`(description LIKE ?${i} OR memo LIKE ?${i})`);
     binds.push(`%${args.query}%`);
@@ -143,7 +143,7 @@ async function searchTransactions(env: Env, args: Args) {
   return { count: results.length, transactions: results };
 }
 
-async function getFinancialSummary(env: Env, args: Args) {
+async function getFinancialSummary(env: Env, userId: string, args: Args) {
   const from = (args.from as string) ?? firstOfThisMonth();
   const to = (args.to as string) ?? today();
   const totals = await env.DB.prepare(
@@ -153,20 +153,20 @@ async function getFinancialSummary(env: Env, args: Args) {
         COALESCE(SUM(amount), 0) AS net,
         COUNT(*) AS count
        FROM transactions
-      WHERE date >= ?1 AND date <= ?2`
+      WHERE user_id = ?1 AND date >= ?2 AND date <= ?3`
   )
-    .bind(from, to)
+    .bind(userId, from, to)
     .first();
   const { results: byCategory } = await env.DB.prepare(
     `SELECT COALESCE(category, 'Uncategorized') AS category,
             ROUND(SUM(amount), 2) AS total,
             COUNT(*) AS count
        FROM transactions
-      WHERE date >= ?1 AND date <= ?2 AND amount < 0
+      WHERE user_id = ?1 AND date >= ?2 AND date <= ?3 AND amount < 0
       GROUP BY category
       ORDER BY total ASC`
   )
-    .bind(from, to)
+    .bind(userId, from, to)
     .all();
   const { results: bySource } = await env.DB.prepare(
     `SELECT COALESCE(source, 'unknown') AS source,
@@ -174,11 +174,11 @@ async function getFinancialSummary(env: Env, args: Args) {
             ROUND(SUM(CASE WHEN amount < 0 THEN amount END), 2) AS total_out,
             COUNT(*) AS count
        FROM transactions
-      WHERE date >= ?1 AND date <= ?2
+      WHERE user_id = ?1 AND date >= ?2 AND date <= ?3
       GROUP BY source
       ORDER BY total_out ASC`
   )
-    .bind(from, to)
+    .bind(userId, from, to)
     .all();
   return { from, to, totals, spend_by_category: byCategory, by_source: bySource };
 }
@@ -197,14 +197,14 @@ async function getScrapeStatus(env: Env) {
   };
 }
 
-async function callTool(env: Env, name: string, args: Args) {
+async function callTool(env: Env, userId: string, name: string, args: Args) {
   switch (name) {
     case "get_transactions":
-      return getTransactions(env, args);
+      return getTransactions(env, userId, args);
     case "search_transactions":
-      return searchTransactions(env, args);
+      return searchTransactions(env, userId, args);
     case "get_financial_summary":
-      return getFinancialSummary(env, args);
+      return getFinancialSummary(env, userId, args);
     case "get_scrape_status":
       return getScrapeStatus(env);
     default:
@@ -227,7 +227,7 @@ function rpcError(id: unknown, code: number, message: string): object {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-async function handleRpc(env: Env, msg: any): Promise<object | null> {
+async function handleRpc(env: Env, userId: string, msg: any): Promise<object | null> {
   const { id, method, params } = msg ?? {};
   // Notifications (no id) — acknowledge with no response body.
   if (id === undefined || id === null) return null;
@@ -247,7 +247,7 @@ async function handleRpc(env: Env, msg: any): Promise<object | null> {
       const name = params?.name as string;
       const args = (params?.arguments ?? {}) as Args;
       try {
-        const data = await callTool(env, name, args);
+        const data = await callTool(env, userId, name, args);
         return rpcResult(id, {
           content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         });
@@ -294,6 +294,9 @@ export default {
         headers: { "Content-Type": "application/json", ...CORS },
       });
     }
+    // Resolve the user this request acts as. The legacy single-user token maps
+    // to 'alon'; OAuth (Phase B) will resolve the token to the authenticated user.
+    const userId = "alon";
 
     let body: any;
     try {
@@ -307,7 +310,7 @@ export default {
 
     // Support JSON-RPC batches and single messages.
     if (Array.isArray(body)) {
-      const responses = (await Promise.all(body.map((m) => handleRpc(env, m)))).filter(
+      const responses = (await Promise.all(body.map((m) => handleRpc(env, userId, m)))).filter(
         (r) => r !== null
       );
       return new Response(JSON.stringify(responses), {
@@ -315,7 +318,7 @@ export default {
       });
     }
 
-    const response = await handleRpc(env, body);
+    const response = await handleRpc(env, userId, body);
     if (response === null) {
       // Notification — 202 with no body.
       return new Response(null, { status: 202, headers: CORS });

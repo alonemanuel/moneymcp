@@ -24,9 +24,10 @@ function startDate(daysBack: number): Date {
 
 const UPSERT_SQL = `
 INSERT INTO transactions
-  (hash, source, account, date, description, memo, amount, currency, status, type, category, scraped_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+  (hash, user_id, source, account, date, description, memo, amount, currency, status, type, category, scraped_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(hash) DO UPDATE SET
+  user_id = excluded.user_id,
   source = excluded.source,
   status = excluded.status,
   memo = excluded.memo,
@@ -36,7 +37,7 @@ ON CONFLICT(hash) DO UPDATE SET
 async function upsertRows(cfg: D1Config, rows: TxnRow[]): Promise<void> {
   for (const r of rows) {
     await d1Query(cfg, UPSERT_SQL, [
-      r.hash, r.source, r.account, r.date, r.description, r.memo,
+      r.hash, r.user_id, r.source, r.account, r.date, r.description, r.memo,
       r.amount, r.currency, r.status, r.type, r.category, r.scraped_at,
     ]);
   }
@@ -58,7 +59,7 @@ async function recordRun(
 }
 
 /** Scrape one provider into rows. Throws on failure. */
-async function scrapeProvider(provider: Provider, daysBack: number): Promise<TxnRow[]> {
+async function scrapeProvider(provider: Provider, userId: string, daysBack: number): Promise<TxnRow[]> {
   console.error(`[scraper] ${provider.source}: scraping ${daysBack} days back...`);
   const args = [
     `--user-data-dir=${provider.profileDir}`,
@@ -93,7 +94,7 @@ async function scrapeProvider(provider: Provider, daysBack: number): Promise<Txn
   const scrapedAt = new Date().toISOString();
   const rows = (result.accounts ?? []).flatMap((acc) =>
     (acc.txns ?? []).map((t) =>
-      txnToRow(provider.source, acc.accountNumber, t as unknown as ScrapedTxn, scrapedAt)
+      txnToRow(userId, provider.source, acc.accountNumber, t as unknown as ScrapedTxn, scrapedAt)
     )
   );
   console.error(`[scraper] ${provider.source}: ${rows.length} transactions`);
@@ -103,6 +104,7 @@ async function scrapeProvider(provider: Provider, daysBack: number): Promise<Txn
 async function main(): Promise<void> {
   const dryRun = process.argv.includes("--dry-run");
   const daysBack = Number(process.env.DAYS_BACK ?? 10);
+  const userId = process.env.USER_ID ?? "alon";
   const providers = providersFromEnv();
   if (providers.length === 0) {
     throw new Error("No providers configured — set credentials for at least one (see providers.ts).");
@@ -116,7 +118,7 @@ async function main(): Promise<void> {
   const failures: string[] = [];
   for (const provider of providers) {
     try {
-      allRows.push(...(await scrapeProvider(provider, daysBack)));
+      allRows.push(...(await scrapeProvider(provider, userId, daysBack)));
     } catch (err: any) {
       const msg = `${provider.source}: ${err?.message ?? String(err)}`;
       console.error(`[scraper] FAILED ${msg}`);
